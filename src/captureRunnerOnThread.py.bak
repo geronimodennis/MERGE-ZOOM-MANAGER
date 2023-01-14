@@ -1,0 +1,174 @@
+from numba import jit
+from threading import Thread
+import multiprocessing as mp
+from numpy import hstack, vstack
+from math import floor, ceil, sqrt
+from CaptureProcessor import CaptureProcessor
+from windowCaptureHandler import WindowCapture
+class CaptureRunnerOnThread:
+
+    """
+    Class that continuously gets frames from a VideoCapture object
+    with a dedicated thread.
+    """
+    frame = None
+    groupFrame = None
+    stopped = False
+    capPorcessor = None 
+    uniformSize = None
+    imageListInfo = [0,0,0,[]]#col, row, imageListCount, imageList
+    groupImageListInfo = [0,0,0]#col, row, imageListCount
+    imageIndexes = []
+
+    
+    queue = None
+    process = None
+
+    chromaColorKey = {0,0,0}
+    captureConfiguration = None
+    def __init__(self, _captureConfiguration, _chromaColorKey):
+        self.queue   = mp.Queue();
+        self.captureConfiguration = _captureConfiguration
+        self.stopped = False
+        self.chromaColorKey = _chromaColorKey
+        self.initCapturePocessor()
+        
+    def start(self):
+        t = Thread(target=self.get);
+        t.setDaemon(True)
+        t.start()
+        #t.join()
+        return self
+
+
+    def startNoThread(self):
+        self.frame = self.threadRunner()
+        return self
+
+    def startWithMultProcessing(self):
+        #not yet working
+        p = mp.Process(target=self.get)
+        p.start()
+        #p.join()
+        return self
+
+    def startGroupImages(self):
+        t = Thread(target=self.getImages);
+        t.setDaemon(True)
+        t.start()
+        #t.join()
+        return self
+
+    def get(self):
+        self.frame = self.threadRunner()
+        #cv2.imshow("ZOOM_GALLERY_MANAGER", self.frame)
+
+    def getImages(self):
+        try:
+            self.frame = self.threadRunner()
+            self.groupFrame = self.threadRunnerForImageList()
+        except:
+            pass
+        #cv2.imshow("ZOOM_GALLERY_MANAGER", self.frame)
+
+    def setImageIndexes(self, imageIndexes):
+        self.imageIndexes = imageIndexes
+
+    def stop(self):
+        self.stopped = True
+
+    
+    def initCapturePocessor(self):
+        if not self.capPorcessor:
+            self.capPorcessor = CaptureProcessor(self.captureConfiguration, self.chromaColorKey)
+        self.capPorcessor.setChromaKey(self.chromaColorKey)
+        return self
+    
+
+    @jit
+    def threadRunner(self):
+        #print("thread is running")
+        self.initCapturePocessor()
+
+        participants = self.capPorcessor.processScreenShot()
+        participantCount = len(participants);
+        sqrtParticipantCount = floor(sqrt(participantCount))
+
+        self.imageListInfo[2] = participantCount
+        self.imageListInfo[3] = participants
+        col, row = 0,0
+        if(participantCount > 0):
+
+            col = self.imageListInfo[0]  = ceil(participantCount / sqrtParticipantCount) 
+            row = self.imageListInfo[1] = ceil(participantCount / col)
+
+            counter = 0
+            rows = []
+            _imH,_imW,_ = participants[0].shape
+            self.uniformSize = (_imW, _imH)
+            blankImg = WindowCapture.newBlankImageSize(self.uniformSize, self.chromaColorKey)
+            for r in range(row):
+                cols = []
+                if(counter < participantCount):
+                    pass
+                for c in range(col):
+                    if(counter < participantCount):
+                        _im = participants[counter]
+                        cols.append(_im)
+                        counter +=1
+                    else:
+                        cols.append(blankImg)
+
+                image_outer = hstack(cols)
+                rows.append(image_outer)
+
+            img = vstack(rows)
+            return img
+        else:
+            return None
+
+        
+    #@jit
+    def threadRunnerForImageList(self):
+        #print("thread is running")
+        self.initCapturePocessor()
+
+        imageIdexes = self.imageIndexes
+        participantCount = len(imageIdexes);
+        sqrtParticipantCount = floor(sqrt(participantCount))
+
+        participants = self.imageListInfo[3]
+        self.groupImageListInfo[2] = participantCount
+        
+        col, row = 0,0
+        if(participantCount > 0):
+
+            col = self.groupImageListInfo[0]  = ceil(participantCount / sqrtParticipantCount) 
+            row = self.groupImageListInfo[1] = ceil(participantCount / col)
+
+            counter = 0
+            rows = []
+            _imH,_imW,_ = participants[0].shape
+            self.uniformSize = (_imW, _imH)
+            blankImg = WindowCapture.newBlankImageSize(self.uniformSize, self.chromaColorKey)
+            for r in range(row):
+                cols = []
+                if(counter < participantCount):
+                    pass
+                for c in range(col):
+                    #self.currentIndex = (self.currentRow  * cols) + self.currentCol
+
+                    if(counter < participantCount):
+                        _im = participants[imageIdexes[counter]]
+                        cols.append(_im)
+                        counter +=1
+                    else:
+                        cols.append(blankImg)
+
+                image_outer = hstack(cols)
+                rows.append(image_outer)
+
+            img = vstack(rows)
+            return img
+        else:
+            return None

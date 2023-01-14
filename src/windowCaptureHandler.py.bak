@@ -1,0 +1,247 @@
+from numba.core.decorators import jit
+import win32gui, win32ui, win32con
+from win32api import GetSystemMetrics
+import cv2
+import numpy as np
+import tkinter as tk
+
+class WindowCapture:
+
+    # properties
+    w = GetSystemMetrics(0)
+    h = GetSystemMetrics(1)
+    hwnd = None
+    cropped_x = 0
+    cropped_y = 0
+    offset_x = 0
+    offset_y = 0
+
+    # constructor
+    def __init__(self,hwnd = None, window_name = ""):
+        # find the handle for the window we want to capture
+        try:
+
+            if(hwnd is None):
+                self.hwnd = win32gui.FindWindow(None, window_name)
+                print("self.hwnd", self.hwnd)
+            else:
+                print("hwnd", hwnd)
+                self.hwnd = hwnd
+
+            # get the window size
+            window_rect = win32gui.GetWindowRect(self.hwnd)
+            self.w = window_rect[2] - window_rect[0]
+            self.h = window_rect[3] - window_rect[1]
+
+            # account for the window border and titlebar and cut them off
+            border_pixels = 0#8
+            titlebar_pixels = 0#30
+            self.w = self.w - (border_pixels * 2)
+            self.h = self.h - titlebar_pixels - border_pixels
+            self.cropped_x = border_pixels
+            self.cropped_y = titlebar_pixels
+
+            # set the cropped coordinates offset so we can translate screenshot
+            # images into actual screen positions
+            self.offset_x = window_rect[0] + self.cropped_x
+            self.offset_y = window_rect[1] + self.cropped_y
+        except:
+            pass
+
+    def resetCapture(self,hwnd = None, window_name = ""):
+        # find the handle for the window we want to capture
+        try:
+
+            if(hwnd is None):
+                self.hwnd = win32gui.FindWindow(None, window_name)
+            else:
+                print("hwnd", hwnd)
+                self.hwnd = hwnd
+
+            # get the window size
+            window_rect = win32gui.GetWindowRect(self.hwnd)
+            self.w = window_rect[2] - window_rect[0]
+            self.h = window_rect[3] - window_rect[1]
+
+            # account for the window border and titlebar and cut them off
+            border_pixels = 0#8
+            titlebar_pixels = 0#30
+            self.w = self.w - (border_pixels * 2)
+            self.h = self.h - titlebar_pixels - border_pixels
+            self.cropped_x = border_pixels
+            self.cropped_y = titlebar_pixels
+
+            # set the cropped coordinates offset so we can translate screenshot
+            # images into actual screen positions
+            self.offset_x = window_rect[0] + self.cropped_x
+            self.offset_y = window_rect[1] + self.cropped_y
+        except:
+            pass
+
+    def get_screenshot(self):
+        try:
+            # get the window image data
+            wDC = win32gui.GetWindowDC(self.hwnd)
+            dcObj = win32ui.CreateDCFromHandle(wDC)
+            cDC = dcObj.CreateCompatibleDC()
+            dataBitMap = win32ui.CreateBitmap()
+            dataBitMap.CreateCompatibleBitmap(dcObj, self.w, self.h)
+            cDC.SelectObject(dataBitMap)
+            cDC.BitBlt((0, 0), (self.w, self.h), dcObj, (0, 0), win32con.SRCCOPY)
+
+            # save the screenshot
+            #dataBitMap.SaveBitmapFile(cDC, 'debug.bmp')
+            signedIntsArray = dataBitMap.GetBitmapBits(True)
+            img = np.fromstring(signedIntsArray, dtype='uint8')
+            img.shape = (self.h, self.w, 4)
+
+            # Free Resources
+            dcObj.DeleteDC()
+            cDC.DeleteDC()
+            win32gui.ReleaseDC(self.hwnd, wDC)
+            win32gui.DeleteObject(dataBitMap.GetHandle())
+
+            img = img[...,:3]
+
+            img = np.ascontiguousarray(img)
+            return img
+        except:
+            return self.newBlankImage()
+
+    @staticmethod
+    def getScreeDimention():
+        ret = [GetSystemMetrics(0), GetSystemMetrics(1)]
+        #ret['w'] = GetSystemMetrics(0);
+        #ret['h'] =  GetSystemMetrics(1);
+        return ret
+    
+    @staticmethod
+    def newBlankImage(r=0,g=0,b=0):
+        w = GetSystemMetrics(0)
+        h = GetSystemMetrics(1)
+        img = np.zeros((h,w,3), np.uint8)
+        # (B, G, R)
+        img[:,0:h] = (b,g,r)
+        img[:,0:w] = (b,g,r)
+        img = img[...,:3]
+        #img[:,w//2:w] = (0,255,0)
+        return img
+
+    @staticmethod
+    #@jit
+    def newBlankImageSize(size = {0,0}, rbgChromaKey = (0,177,64)):
+        if(rbgChromaKey is None):
+            rbgChromaKey = (0,177,64)
+
+        h = size[0] #( hieght and Width )
+        w = size[1]
+        r,g,b = rbgChromaKey
+      
+        img = np.zeros((w,h,3), np.uint8)
+        # (B, G, R)
+        img[:,0:h] = (b,g,r)
+        img[:,0:w] = (b,g,r)
+        img = img[...,:3]
+        #img[:,w//2:w] = (0,255,0)
+        return img
+
+# ================================
+# class WindowCapture:
+
+#     # properties
+#     w = 0
+#     h = 0
+#     hwnd = None
+#     cropped_x = 0
+#     cropped_y = 0
+#     offset_x = 0
+#     offset_y = 0
+
+#     # constructor
+#     def __init__(self, window_name):
+#         # find the handle for the window we want to capture
+#         self.hwnd = win32gui.FindWindow(None, window_name)
+#         if not self.hwnd:
+#             raise Exception('Window not found: {}'.format(window_name))
+
+#         # get the window size
+#         window_rect = win32gui.GetWindowRect(self.hwnd)
+#         self.w = window_rect[2] - window_rect[0]
+#         self.h = window_rect[3] - window_rect[1]
+
+#         # account for the window border and titlebar and cut them off
+#         border_pixels = 8
+#         titlebar_pixels = 30
+#         self.w = self.w - (border_pixels * 2)
+#         self.h = self.h - titlebar_pixels - border_pixels
+#         self.cropped_x = border_pixels
+#         self.cropped_y = titlebar_pixels
+
+#         # set the cropped coordinates offset so we can translate screenshot
+#         # images into actual screen positions
+#         self.offset_x = window_rect[0] + self.cropped_x
+#         self.offset_y = window_rect[1] + self.cropped_y
+
+#     def get_screenshot(self):
+
+#         # get the window image data
+#         wDC = win32gui.GetWindowDC(self.hwnd)
+#         dcObj = win32ui.CreateDCFromHandle(wDC)
+#         cDC = dcObj.CreateCompatibleDC()
+#         dataBitMap = win32ui.CreateBitmap()
+#         dataBitMap.CreateCompatibleBitmap(dcObj, self.w, self.h)
+#         cDC.SelectObject(dataBitMap)
+#         cDC.BitBlt((0, 0), (self.w, self.h), dcObj, (self.cropped_x, self.cropped_y), win32con.SRCCOPY)
+
+#         # convert the raw data into a format opencv can read
+#         #dataBitMap.SaveBitmapFile(cDC, 'debug.bmp')
+#         signedIntsArray = dataBitMap.GetBitmapBits(True)
+#         img = np.fromstring(signedIntsArray, dtype='uint8')
+#         img.shape = (self.h, self.w, 4)
+
+#         # free resources
+#         dcObj.DeleteDC()
+#         cDC.DeleteDC()
+#         win32gui.ReleaseDC(self.hwnd, wDC)
+#         win32gui.DeleteObject(dataBitMap.GetHandle())
+
+#         # drop the alpha channel, or cv.matchTemplate() will throw an error like:
+#         #   error: (-215:Assertion failed) (depth == CV_8U || depth == CV_32F) && type == _templ.type() 
+#         #   && _img.dims() <= 2 in function 'cv::matchTemplate'
+#         #img = img[...,:3]
+
+#         # make image C_CONTIGUOUS to avoid errors that look like:
+#         #   File ... in draw_rectangles
+#         #   TypeError: an integer is required (got type tuple)
+#         # see the discussion here:
+#         # https://github.com/opencv/opencv/issues/14866#issuecomment-580207109
+#         #img = np.ascontiguousarray(img)
+
+#         return img
+
+
+# =========================
+# reference: https://learncodebygaming.com/blog/fast-window-capture
+# import win32gui
+# import win32ui
+# import win32con
+
+# w = 1920 # set this
+# h = 1080 # set this
+# bmpfilenamename = "out.bmp" #set this
+
+# hwnd = win32gui.FindWindow(None, "Zoom Meeting")
+# wDC = win32gui.GetWindowDC(hwnd)
+# dcObj=win32ui.CreateDCFromHandle(wDC)
+# cDC=dcObj.CreateCompatibleDC()
+# dataBitMap = win32ui.CreateBitmap()
+# dataBitMap.CreateCompatibleBitmap(dcObj, w, h)
+# cDC.SelectObject(dataBitMap)
+# cDC.BitBlt((0,0),(w, h) , dcObj, (0,0), win32con.SRCCOPY)
+# dataBitMap.SaveBitmapFile(cDC, bmpfilenamename)
+
+# # Free Resources
+# dcObj.DeleteDC()
+# cDC.DeleteDC()
+# win32gui.ReleaseDC(hwnd, wDC)
+# win32gui.DeleteObject(dataBitMap.GetHandle())

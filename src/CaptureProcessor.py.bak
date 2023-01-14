@@ -1,0 +1,101 @@
+from numba import jit
+from cv2 import inRange, findContours, approxPolyDP, boundingRect, copyMakeBorder, arcLength ,resize, RETR_TREE, CHAIN_APPROX_SIMPLE, BORDER_CONSTANT ,INTER_NEAREST
+from numpy import array
+from windowCaptureHandler import WindowCapture
+
+
+
+class CaptureProcessor:
+    _captureConfigurationList = []
+    _chromaKey = (0,177,64)
+    def __init__(self, captureConfigurationList, chromaKey = _chromaKey):
+        if(chromaKey is None):
+            chromaKey = self._chromaKey
+        r,g,b = chromaKey
+        self._chromaKey = (b,g,r)
+        self._captureConfigurationList = captureConfigurationList
+
+
+    #@jit(parallel=True)
+    @jit
+    def processScreenShot(self, useSmallerCapture = False):
+
+        mainList = []
+        dimSize = None
+        #lowResFactor = 4
+        
+        for config in self._captureConfigurationList:
+            captureHandler = config["captureHandler"]
+            subList = []
+            if captureHandler:
+                screenshot = captureHandler.get_screenshot()
+
+                #sH, sW, _ = screenshot.shape
+                #image = cv2.resize(screenshot, (int(sW / lowResFactor),int(sH / lowResFactor)))              
+                image =  screenshot #cv2.cvtColor(screenshot, cv2.COLOR_RGB2BGR) 
+                #image2chroma = image.copy()
+
+                #get the 1st pixel color of the image, for chroma masking
+                firstColorToMask = image[0,0]
+            
+                #mask exact color
+                toMaskColor_lo=array(firstColorToMask)
+                #toMaskColor_hi=np.array(firstColorToMask)
+
+                # Mask the image
+                mask=inRange(image,toMaskColor_lo,toMaskColor_lo)
+                # Change image 
+                
+                #cv2.imwrite("mask.bmp", mask)
+                contours, hierarchy = findContours(mask, RETR_TREE, CHAIN_APPROX_SIMPLE)
+                for contour in contours:
+                    approx = approxPolyDP(contour, 0.01* arcLength(contour, True), True)
+
+                    #find square or rectangle
+                    if len(approx) == 4 :
+                        x, y , w, h = boundingRect(approx)
+                        aspectRatio = w/h
+                        if aspectRatio >= 1.7 and h >=50 and h <= 540:  #and h >= 50 and h <= image.shape[0]/2: #and h >= (50 / lowResFactor) and h <= ((image.shape[0]/2)/lowResFactor) :  #(h >=50 and h <= 540):
+                        
+                            borderSize = 3
+                            validImg = copyMakeBorder(
+                                image[y:y+h, x:x+w], 
+                                #screenshot[y * lowResFactor: (y+h) * lowResFactor, x * lowResFactor : (x+w) * lowResFactor ],
+                                borderSize, 
+                                borderSize, 
+                                borderSize, 
+                                borderSize, 
+                                BORDER_CONSTANT, 
+                                value=self._chromaKey
+                            )
+
+                            h, w, _ = validImg.shape
+
+                            if(dimSize is None):
+                                # width = w #int(w * 100 / 100)
+                                # height = h #int(h * 100 / 100)
+                                dimSize = (w, h)
+                                #lst.append(validImg)
+                            else:
+                                #lst.append(cv2.resize(validImg, dimSize))
+                                validImg = resize(validImg, dimSize, interpolation=INTER_NEAREST)
+                            
+                            subList.append(validImg)  
+                            #del validImg
+
+            if(len(subList) > 0):
+                subList = subList[::-1] #np.array(subList[::-1]) 
+                mainList = mainList + subList
+                
+                
+
+        if(len(mainList) > 0):
+            mainList = array(mainList)
+                
+        return mainList
+
+    def setChromaKey(self, chromaKey):
+        if(chromaKey is None):
+            chromaKey = self._chromaKey
+        r,g,b = chromaKey
+        self._chromaKey = (b,g,r)
