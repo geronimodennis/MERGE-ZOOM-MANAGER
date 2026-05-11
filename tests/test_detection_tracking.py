@@ -135,10 +135,10 @@ def test_detector_uses_zoom_name_badges_to_infer_full_cards():
     image[995:, :] = (2, 2, 3)
 
     card_y = 281
-    card_h = 526
-    card_w = 936
-    first_x = 24
-    second_x = 960
+    card_h = 450
+    card_w = 800
+    first_x = 150
+    second_x = 970
 
     image[card_y : card_y + card_h, first_x : first_x + card_w] = (34, 34, 34)
     image[card_y : card_y + card_h, second_x : second_x + card_w] = (34, 34, 34)
@@ -181,8 +181,12 @@ def test_detector_uses_zoom_name_badges_to_infer_full_cards():
     assert tiles[0].x <= first_x + 15
     assert abs(tiles[0].width - card_w) < 60
     assert abs(tiles[0].height - card_h) < 60
+    assert tiles[0].width <= MAX_PARTICIPANT_RECT_WIDTH
+    assert tiles[0].height <= MAX_PARTICIPANT_RECT_HEIGHT
     assert tiles[1].x >= second_x - 20
     assert abs(tiles[1].width - card_w) < 60
+    assert tiles[1].width <= MAX_PARTICIPANT_RECT_WIDTH
+    assert tiles[1].height <= MAX_PARTICIPANT_RECT_HEIGHT
 
 
 def test_detector_uses_gallery_rectangles_before_inner_fragments():
@@ -192,9 +196,9 @@ def test_detector_uses_gallery_rectangles_before_inner_fragments():
     image[995:, :] = (2, 2, 3)
 
     card_y = 270
-    card_h = 504
-    card_w = 896
-    first_x = 64
+    card_h = 450
+    card_w = 800
+    first_x = 160
     second_x = first_x + card_w
 
     image[card_y : card_y + card_h, first_x : second_x + card_w] = (34, 34, 34)
@@ -356,14 +360,14 @@ def test_centered_name_fallback_ignores_partial_edge_box_near_label_edge():
 
     assert len(candidates) == 1
     assert candidates[0].reason == "center-name-layout"
-    assert candidates[0].rect[2] >= 900
-    assert candidates[0].rect[3] >= 500
+    assert candidates[0].rect[2] <= MAX_PARTICIPANT_RECT_WIDTH
+    assert candidates[0].rect[3] <= MAX_PARTICIPANT_RECT_HEIGHT
 
 
 def test_detector_removes_overlapping_partial_edge_when_full_tile_exists():
     detector = ZoomGalleryDetector()
     partial_edge = DetectionCandidate((210, 160, 780, 409), 0.64, "edge")
-    full_tile = DetectionCandidate((488, 213, 944, 534), 0.74, "center-name-layout")
+    full_tile = DetectionCandidate((553, 254, 815, 452), 0.74, "center-name-layout")
 
     candidates = detector._remove_overlapping_unstable_boxes([partial_edge, full_tile])
 
