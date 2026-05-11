@@ -59,6 +59,34 @@ def test_detector_finds_dynamic_gallery_tiles():
     assert [tile.rect for tile in tiles] == sorted([tile.rect for tile in tiles], key=lambda rect: (rect[1], rect[0]))
 
 
+def test_detector_consolidates_single_tile_content_fragments():
+    image = np.zeros((520, 900, 3), dtype=np.uint8)
+    image[:, :] = (18, 18, 18)
+    tile_x, tile_y, tile_width, tile_height = 90, 70, 700, 394
+    image[tile_y : tile_y + tile_height, tile_x : tile_x + tile_width] = (22, 22, 22)
+
+    cv2.ellipse(image, (tile_x + 180, tile_y + 150), (115, 155), 0, 0, 360, (90, 150, 205), -1)
+    cv2.rectangle(image, (tile_x + 430, tile_y + 40), (tile_x + 680, tile_y + 260), (55, 95, 80), -1)
+    cv2.rectangle(image, (tile_x + 24, tile_y + tile_height - 78), (tile_x + 250, tile_y + tile_height - 20), (12, 12, 12), -1)
+    cv2.putText(
+        image,
+        "DenDen",
+        (tile_x + 35, tile_y + tile_height - 36),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.5,
+        (245, 245, 245),
+        4,
+    )
+
+    detector = ZoomGalleryDetector()
+
+    tiles = detector.detect(image, source_key="zoom")
+
+    assert len(tiles) == 1
+    assert tiles[0].width > 500
+    assert tiles[0].height > 300
+
+
 def test_tracker_keeps_ids_when_gallery_layout_changes():
     detector = ZoomGalleryDetector()
     tracker = ParticipantTracker()

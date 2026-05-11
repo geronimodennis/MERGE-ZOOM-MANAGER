@@ -131,9 +131,11 @@ class WindowCapture:
             if win32gui.IsIconic(self.hwnd):
                 return self.newBlankImageSize((self.w, self.h))
 
-            image = self._capture_with_print_window()
-            if image is None:
-                image = self._capture_selected_rect_from_screen()
+            image = self._capture_selected_rect_from_screen()
+            if self._looks_blank(image):
+                print_window_image = self._capture_with_print_window()
+                if print_window_image is not None:
+                    image = print_window_image
             return image
         except Exception as error:
             now = time()

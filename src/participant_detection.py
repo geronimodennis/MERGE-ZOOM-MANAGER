@@ -38,6 +38,7 @@ class ZoomGalleryDetector:
         candidates = []
         candidates.extend(self._detect_from_projection(image))
         candidates.extend(self._detect_from_edges(image))
+        candidates = self._consolidate_candidates(image, candidates)
         candidates = self._remove_containing_boxes(self._dedupe(candidates))
         candidates.sort(key=lambda item: (item.rect[1], item.rect[0]))
 
@@ -117,6 +118,82 @@ class ZoomGalleryDetector:
             area_ratio = (width * height) / float(image_width * image_height)
             candidates.append(DetectionCandidate(rect, min(0.9, 0.45 + area_ratio), "edge"))
         return candidates
+
+    def _consolidate_candidates(
+        self,
+        image: np.ndarray,
+        candidates: List[DetectionCandidate],
+    ) -> List[DetectionCandidate]:
+        candidates = self._remove_containing_boxes(self._dedupe(candidates))
+        if len(candidates) <= 1 or self._candidates_look_like_tiles(candidates):
+            return candidates
+
+        image_height, image_width = image.shape[:2]
+        union = self._expand_to_tile_rect(self._union_rect([candidate.rect for candidate in candidates]), image_width, image_height)
+        if self._is_valid_rect(union, image_width, image_height) and self._has_meaningful_content(image, union):
+            return [DetectionCandidate(union, 0.92, "fragment-union")]
+
+        return candidates
+
+    @staticmethod
+    def _union_rect(rects: List[Rect]) -> Rect:
+        x1 = min(rect[0] for rect in rects)
+        y1 = min(rect[1] for rect in rects)
+        x2 = max(rect[0] + rect[2] for rect in rects)
+        y2 = max(rect[1] + rect[3] for rect in rects)
+        return x1, y1, x2 - x1, y2 - y1
+
+    def _expand_to_tile_rect(self, rect: Rect, image_width: int, image_height: int) -> Rect:
+        x, y, width, height = rect
+        margin_x = max(4, int(image_width * 0.008))
+        margin_y = max(4, int(image_height * 0.008))
+        x -= margin_x
+        y -= margin_y
+        width += margin_x * 2
+        height += margin_y * 2
+
+        target_aspect = 16.0 / 9.0
+        aspect = width / float(max(1, height))
+        center_x = x + width / 2.0
+        center_y = y + height / 2.0
+
+        if aspect < 1.15:
+            width = int(height * target_aspect)
+        elif aspect > 2.35:
+            height = int(width / target_aspect)
+
+        x = int(round(center_x - width / 2.0))
+        y = int(round(center_y - height / 2.0))
+        x = max(0, min(x, image_width - 1))
+        y = max(0, min(y, image_height - 1))
+        width = min(width, image_width - x)
+        height = min(height, image_height - y)
+        return x, y, max(1, int(width)), max(1, int(height))
+
+    @staticmethod
+    def _candidates_look_like_tiles(candidates: List[DetectionCandidate]) -> bool:
+        if len(candidates) <= 1:
+            return True
+
+        widths = np.array([candidate.rect[2] for candidate in candidates], dtype=np.float32)
+        heights = np.array([candidate.rect[3] for candidate in candidates], dtype=np.float32)
+        areas = widths * heights
+        aspects = widths / np.maximum(1.0, heights)
+
+        width_cv = float(np.std(widths) / max(1.0, np.mean(widths)))
+        height_cv = float(np.std(heights) / max(1.0, np.mean(heights)))
+        area_cv = float(np.std(areas) / max(1.0, np.mean(areas)))
+        sane_aspects = bool(np.all((aspects >= 1.05) & (aspects <= 2.45)))
+        return sane_aspects and width_cv < 0.28 and height_cv < 0.28 and area_cv < 0.45
+
+    def _has_meaningful_content(self, image: np.ndarray, rect: Rect) -> bool:
+        x, y, width, height = rect
+        crop = image[y : y + height, x : x + width]
+        if crop.size == 0:
+            return False
+        mask = self._foreground_mask(crop)
+        density = float(np.count_nonzero(mask)) / max(1, width * height)
+        return density >= 0.015
 
     def _foreground_mask(self, image: np.ndarray) -> np.ndarray:
         height, width = image.shape[:2]
