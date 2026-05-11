@@ -399,8 +399,6 @@ class ZoomGalleryDetector:
                 rect = self._rect_centered_in_roi(label_center_x, label_center_y, tile_width, tile_height, (roi_x, roi_y, roi_width, roi_height))
                 if not self._is_valid_rect(rect, image_width, image_height):
                     continue
-                if any(candidate.reason in STABLE_TILE_REASONS and self._iou(rect, candidate.rect) > 0.45 for candidate in existing_candidates):
-                    continue
                 candidates.append(DetectionCandidate(rect, 0.74, "center-name-layout"))
 
         return self._dedupe(candidates)
@@ -661,7 +659,7 @@ class ZoomGalleryDetector:
             return False
         if not self._is_cardish_aspect(candidate.rect):
             return False
-        if candidate.reason in STABLE_TILE_REASONS:
+        if self._label_looks_like_name_badge_inside_candidate(label, candidate.rect):
             return True
 
         candidate_center_x = x + width / 2.0
@@ -684,6 +682,16 @@ class ZoomGalleryDetector:
             and top_margin >= min_vertical_margin
             and bottom_margin >= min_vertical_margin
         )
+
+    @staticmethod
+    def _label_looks_like_name_badge_inside_candidate(label: Rect, candidate_rect: Rect) -> bool:
+        label_x, label_y, label_width, label_height = label
+        candidate_x, candidate_y, candidate_width, candidate_height = candidate_rect
+        label_center_y = label_y + label_height / 2.0
+        lower_badge_band = candidate_y + candidate_height * 0.68
+        label_is_compact = label_width <= candidate_width * 0.45
+        label_has_left_room = label_x <= candidate_x + candidate_width * 0.50
+        return label_center_y >= lower_badge_band and label_is_compact and label_has_left_room
 
     def _find_zoom_name_badges(self, image: np.ndarray, roi: Rect | None = None) -> List[Rect]:
         roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi)
@@ -1000,10 +1008,35 @@ class ZoomGalleryDetector:
         candidates = sorted(candidates, key=lambda item: item.score, reverse=True)
         keep: List[DetectionCandidate] = []
         for candidate in candidates:
-            if any(self._iou(candidate.rect, other.rect) > 0.55 for other in keep):
+            if any(self._is_duplicate_candidate(candidate, other) for other in keep):
                 continue
             keep.append(candidate)
         return keep
+
+    def _is_duplicate_candidate(self, candidate: DetectionCandidate, other: DetectionCandidate) -> bool:
+        if self._iou(candidate.rect, other.rect) <= 0.55:
+            return False
+        if self._is_allowed_center_name_overlap(candidate, other):
+            return False
+        return True
+
+    @staticmethod
+    def _is_allowed_center_name_overlap(candidate: DetectionCandidate, other: DetectionCandidate) -> bool:
+        if candidate.reason == other.reason:
+            return False
+        if candidate.reason != "center-name-layout" and other.reason != "center-name-layout":
+            return False
+
+        candidate_center_x = candidate.rect[0] + candidate.rect[2] / 2.0
+        candidate_center_y = candidate.rect[1] + candidate.rect[3] / 2.0
+        other_center_x = other.rect[0] + other.rect[2] / 2.0
+        other_center_y = other.rect[1] + other.rect[3] / 2.0
+        min_width = min(candidate.rect[2], other.rect[2])
+        min_height = min(candidate.rect[3], other.rect[3])
+        return (
+            abs(candidate_center_x - other_center_x) >= min_width * 0.20
+            or abs(candidate_center_y - other_center_y) >= min_height * 0.20
+        )
 
     def _remove_containing_boxes(self, candidates: List[DetectionCandidate]) -> List[DetectionCandidate]:
         remove_indexes = set()

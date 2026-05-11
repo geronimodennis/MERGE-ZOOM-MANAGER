@@ -379,12 +379,49 @@ def test_centered_name_fallback_uses_nearest_detected_tile_size():
     assert candidates[0].rect[2:] == detected_tile.rect[2:]
 
 
+def test_centered_name_fallback_allows_overlap_margin_from_neighbor_tile():
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    image[:, :] = (17, 20, 22)
+    roi = full_frame_roi(image)
+    put_centered_text(image, "Camera Off", (680, 260))
+    neighbor_tile = DetectionCandidate((100, 88, 600, 338), 0.98, "gallery-rectangle")
+    detector = ZoomGalleryDetector()
+
+    candidates = detector._detect_from_centered_names(image, roi, [neighbor_tile])
+
+    assert len(candidates) == 1
+    assert candidates[0].reason == "center-name-layout"
+    assert candidates[0].rect[2:] == neighbor_tile.rect[2:]
+
+
+def test_centered_name_fallback_suppresses_bottom_name_badge_inside_tile():
+    image = np.zeros((520, 900, 3), dtype=np.uint8)
+    image[:, :] = (18, 18, 18)
+    put_centered_text(image, "DenDen", (210, 412))
+    existing_tile = DetectionCandidate((90, 70, 700, 394), 0.92, "fragment-union")
+    detector = ZoomGalleryDetector()
+
+    candidates = detector._detect_from_centered_names(image, full_frame_roi(image), [existing_tile])
+
+    assert candidates == []
+
+
 def test_centered_name_fallback_keeps_nearest_size_inside_roi_edge():
     detector = ZoomGalleryDetector()
 
     rect = detector._rect_centered_in_roi(960, 900, 900, 506, (0, 53, 1920, 855))
 
     assert rect == (510, 402, 900, 506)
+
+
+def test_dedupe_allows_overlapping_center_name_with_distinct_center():
+    detector = ZoomGalleryDetector()
+    existing_tile = DetectionCandidate((100, 100, 700, 400), 0.98, "gallery-rectangle")
+    camera_off_tile = DetectionCandidate((260, 100, 700, 400), 0.74, "center-name-layout")
+
+    candidates = detector._dedupe([existing_tile, camera_off_tile])
+
+    assert candidates == [existing_tile, camera_off_tile]
 
 
 def test_detector_removes_overlapping_partial_edge_when_full_tile_exists():
