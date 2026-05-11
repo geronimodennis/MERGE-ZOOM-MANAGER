@@ -9,6 +9,8 @@ from models import ParticipantTile, Rect
 
 DEFAULT_TOP_MENU_HEIGHT = 53
 DEFAULT_BOTTOM_MENU_HEIGHT = 100
+MAX_PARTICIPANT_RECT_WIDTH = 944
+MAX_PARTICIPANT_RECT_HEIGHT = 534
 
 
 @dataclass
@@ -355,6 +357,7 @@ class ZoomGalleryDetector:
                 tile_width, tile_height = self._estimate_tile_size_for_name_row(row_labels, row_index, row_centers, roi_width, roi_height)
             else:
                 tile_width, tile_height = known_size
+            tile_width, tile_height = self._clamp_participant_size(tile_width, tile_height)
 
             if tile_width <= 0 or tile_height <= 0:
                 continue
@@ -438,7 +441,21 @@ class ZoomGalleryDetector:
             tile_height = roi_height
             tile_width = int(round(tile_height * 16.0 / 9.0))
 
-        return max(1, tile_width), max(1, tile_height)
+        return self._clamp_participant_size(tile_width, tile_height)
+
+    @staticmethod
+    def _clamp_participant_size(width: int, height: int) -> Tuple[int, int]:
+        width = max(1, int(width))
+        height = max(1, int(height))
+        scale = min(
+            1.0,
+            MAX_PARTICIPANT_RECT_WIDTH / float(width),
+            MAX_PARTICIPANT_RECT_HEIGHT / float(height),
+        )
+        if scale < 1.0:
+            width = max(1, int(round(width * scale)))
+            height = max(1, int(round(height * scale)))
+        return width, height
 
     @staticmethod
     def _estimate_row_height(row_index: int, row_centers: List[float], roi_height: int) -> int:
@@ -744,6 +761,8 @@ class ZoomGalleryDetector:
         min_width = max(48, int(image_width * 0.045))
         min_height = max(42, int(image_height * 0.05))
         if width < min_width or height < min_height:
+            return False
+        if width > MAX_PARTICIPANT_RECT_WIDTH or height > MAX_PARTICIPANT_RECT_HEIGHT:
             return False
 
         area_ratio = (width * height) / float(max(1, image_width * image_height))

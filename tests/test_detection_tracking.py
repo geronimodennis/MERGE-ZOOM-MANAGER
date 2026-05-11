@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from image_utils import stack_tiles
 from models import ParticipantTile
-from participant_detection import DetectionCandidate, ZoomGalleryDetector
+from participant_detection import MAX_PARTICIPANT_RECT_HEIGHT, MAX_PARTICIPANT_RECT_WIDTH, DetectionCandidate, ZoomGalleryDetector
 from participant_tracking import ParticipantTracker
 
 
@@ -293,6 +293,28 @@ def test_detector_infers_camera_off_tiles_from_centered_names():
     assert all(240 <= tile.height <= 290 for tile in tiles)
     assert tiles[0].x < 40
     assert 480 <= tiles[1].x <= 530
+
+
+def test_detector_rejects_participant_rectangles_larger_than_max_bound():
+    detector = ZoomGalleryDetector()
+
+    assert detector._is_valid_rect((0, 0, MAX_PARTICIPANT_RECT_WIDTH, MAX_PARTICIPANT_RECT_HEIGHT), 1920, 1080)
+    assert not detector._is_valid_rect((0, 0, MAX_PARTICIPANT_RECT_WIDTH + 1, MAX_PARTICIPANT_RECT_HEIGHT), 1920, 1080)
+    assert not detector._is_valid_rect((0, 0, MAX_PARTICIPANT_RECT_WIDTH, MAX_PARTICIPANT_RECT_HEIGHT + 1), 1920, 1080)
+
+
+def test_centered_name_fallback_stays_inside_max_participant_bound():
+    image = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    image[:, :] = (17, 20, 22)
+    put_centered_text(image, "Camera Off", (960, 540))
+    detector = ZoomGalleryDetector()
+
+    tiles = detector.detect(image, source_key="zoom", roi=full_frame_roi(image))
+
+    assert len(tiles) == 1
+    assert tiles[0].debug_reason == "center-name-layout"
+    assert tiles[0].width <= MAX_PARTICIPANT_RECT_WIDTH
+    assert tiles[0].height <= MAX_PARTICIPANT_RECT_HEIGHT
 
 
 def test_tracker_keeps_ids_when_gallery_layout_changes():
