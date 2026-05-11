@@ -363,7 +363,7 @@ def test_centered_name_fallback_ignores_partial_edge_box_near_label_edge():
 def test_detector_removes_overlapping_partial_edge_when_full_tile_exists():
     detector = ZoomGalleryDetector()
     partial_edge = DetectionCandidate((210, 160, 780, 409), 0.64, "edge")
-    full_tile = DetectionCandidate((488, 213, 945, 535), 0.74, "center-name-layout")
+    full_tile = DetectionCandidate((488, 213, 944, 534), 0.74, "center-name-layout")
 
     candidates = detector._remove_overlapping_unstable_boxes([partial_edge, full_tile])
 
