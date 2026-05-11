@@ -364,10 +364,33 @@ def test_centered_name_fallback_ignores_partial_edge_box_near_label_edge():
     assert candidates[0].rect[3] <= MAX_PARTICIPANT_RECT_HEIGHT
 
 
+def test_centered_name_fallback_uses_nearest_detected_tile_size():
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    image[:, :] = (17, 20, 22)
+    roi = full_frame_roi(image)
+    put_centered_text(image, "Camera Off", (940, 260))
+    detected_tile = DetectionCandidate((80, 88, 640, 360), 0.64, "edge")
+    detector = ZoomGalleryDetector()
+
+    candidates = detector._detect_from_centered_names(image, roi, [detected_tile])
+
+    assert len(candidates) == 1
+    assert candidates[0].reason == "center-name-layout"
+    assert candidates[0].rect[2:] == detected_tile.rect[2:]
+
+
+def test_centered_name_fallback_keeps_nearest_size_inside_roi_edge():
+    detector = ZoomGalleryDetector()
+
+    rect = detector._rect_centered_in_roi(960, 900, 900, 506, (0, 53, 1920, 855))
+
+    assert rect == (510, 402, 900, 506)
+
+
 def test_detector_removes_overlapping_partial_edge_when_full_tile_exists():
     detector = ZoomGalleryDetector()
     partial_edge = DetectionCandidate((210, 160, 780, 409), 0.64, "edge")
-    full_tile = DetectionCandidate((488, 213, 944, 534), 0.74, "center-name-layout")
+    full_tile = DetectionCandidate((488, 213, 945, 535), 0.74, "center-name-layout")
 
     candidates = detector._remove_overlapping_unstable_boxes([partial_edge, full_tile])
 

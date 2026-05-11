@@ -9,10 +9,10 @@ from models import ParticipantTile, Rect
 
 DEFAULT_TOP_MENU_HEIGHT = 53
 DEFAULT_BOTTOM_MENU_HEIGHT = 100
-MAX_PARTICIPANT_RECT_WIDTH = 944
-MAX_PARTICIPANT_RECT_HEIGHT = 534
-PROBABLE_PARTICIPANT_RECT_WIDTH = 944
-PROBABLE_PARTICIPANT_RECT_HEIGHT = 534
+MAX_PARTICIPANT_RECT_WIDTH = 945
+MAX_PARTICIPANT_RECT_HEIGHT = 535
+PROBABLE_PARTICIPANT_RECT_WIDTH = 945
+PROBABLE_PARTICIPANT_RECT_HEIGHT = 535
 DETECTION_SCAN_MAX_WIDTH = 960
 STABLE_TILE_REASONS = {
     "gallery-rectangle",
@@ -367,24 +367,33 @@ class ZoomGalleryDetector:
 
         roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi)
         image_height, image_width = image.shape[:2]
-        known_size = self._probable_tile_size_from_candidates(existing_candidates)
         row_groups = self._group_badges_by_row(uncovered_labels, max_gap=max(18, roi_height // 18))
         row_centers = [float(np.mean([label[1] + label[3] / 2.0 for label in row])) for row in row_groups]
+        known_size = self._probable_tile_size_from_candidates(existing_candidates)
 
         candidates: List[DetectionCandidate] = []
         for row_index, row_labels in enumerate(row_groups):
             row_labels.sort(key=lambda rect: rect[0])
             row_center_y = row_centers[row_index]
-            if known_size is None:
-                tile_width, tile_height = self._estimate_tile_size_for_name_row(row_labels, row_index, row_centers, roi_width, roi_height)
-            else:
-                tile_width, tile_height = known_size
-            tile_width, tile_height = self._clamp_participant_size(tile_width, tile_height)
-
-            if tile_width <= 0 or tile_height <= 0:
-                continue
 
             for label in row_labels:
+                nearest_size = self._nearest_tile_size_for_label(label, existing_candidates)
+                if nearest_size is not None:
+                    tile_width, tile_height = nearest_size
+                elif known_size is not None:
+                    tile_width, tile_height = known_size
+                else:
+                    tile_width, tile_height = self._estimate_tile_size_for_name_row(
+                        row_labels,
+                        row_index,
+                        row_centers,
+                        roi_width,
+                        roi_height,
+                    )
+                tile_width, tile_height = self._clamp_participant_size(tile_width, tile_height)
+                if tile_width <= 0 or tile_height <= 0:
+                    continue
+
                 label_center_x = label[0] + label[2] / 2.0
                 label_center_y = label[1] + label[3] / 2.0 if len(row_groups) == 1 else row_center_y
                 rect = self._rect_centered_in_roi(label_center_x, label_center_y, tile_width, tile_height, (roi_x, roi_y, roi_width, roi_height))
@@ -533,6 +542,38 @@ class ZoomGalleryDetector:
         heights = np.array([rect[3] for rect in cardish], dtype=np.float32)
         return int(round(float(np.median(widths)))), int(round(float(np.median(heights))))
 
+    def _nearest_tile_size_for_label(
+        self,
+        label: Rect,
+        candidates: List[DetectionCandidate],
+    ) -> Tuple[int, int] | None:
+        label_center_x = label[0] + label[2] / 2.0
+        label_center_y = label[1] + label[3] / 2.0
+        scored_sizes = []
+
+        for candidate in candidates:
+            x, y, width, height = candidate.rect
+            if not self._is_cardish_aspect(candidate.rect):
+                continue
+
+            center_x = x + width / 2.0
+            center_y = y + height / 2.0
+            label_inside = x <= label_center_x <= x + width and y <= label_center_y <= y + height
+            if label_inside and not self._candidate_covers_centered_label(label, candidate):
+                continue
+
+            clamped_width, clamped_height = self._clamp_participant_size(width, height)
+            stable_penalty = 0 if candidate.reason in STABLE_TILE_REASONS else 1
+            row_distance = abs(label_center_y - center_y)
+            center_distance = ((label_center_x - center_x) ** 2 + (label_center_y - center_y) ** 2) ** 0.5
+            scored_sizes.append((stable_penalty, row_distance, center_distance, clamped_width, clamped_height))
+
+        if not scored_sizes:
+            return None
+
+        _stable_penalty, _row_distance, _center_distance, width, height = min(scored_sizes)
+        return width, height
+
     def _estimate_tile_size_for_name_row(
         self,
         row_labels: List[Rect],
@@ -594,13 +635,13 @@ class ZoomGalleryDetector:
     @staticmethod
     def _rect_centered_in_roi(center_x: float, center_y: float, width: int, height: int, roi: Rect) -> Rect:
         roi_x, roi_y, roi_width, roi_height = roi
+        width = min(max(1, int(width)), roi_width)
+        height = min(max(1, int(height)), roi_height)
         x = int(round(center_x - width / 2.0))
         y = int(round(center_y - height / 2.0))
-        x = max(roi_x, min(x, roi_x + roi_width - 1))
-        y = max(roi_y, min(y, roi_y + roi_height - 1))
-        width = min(width, roi_x + roi_width - x)
-        height = min(height, roi_y + roi_height - y)
-        return x, y, max(1, int(width)), max(1, int(height))
+        x = max(roi_x, min(x, roi_x + roi_width - width))
+        y = max(roi_y, min(y, roi_y + roi_height - height))
+        return x, y, width, height
 
     def _clamp_rect_to_participant_bounds(self, rect: Rect, roi: Rect) -> Rect:
         x, y, width, height = rect
