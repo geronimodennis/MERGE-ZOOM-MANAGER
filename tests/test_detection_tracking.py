@@ -87,6 +87,94 @@ def test_detector_consolidates_single_tile_content_fragments():
     assert tiles[0].height > 300
 
 
+def test_detector_uses_zoom_name_badges_to_infer_full_cards():
+    image = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    image[:, :] = (17, 20, 22)
+    image[:78, :] = (43, 43, 45)
+    image[995:, :] = (2, 2, 3)
+
+    card_y = 281
+    card_h = 526
+    card_w = 936
+    first_x = 24
+    second_x = 960
+
+    image[card_y : card_y + card_h, first_x : first_x + card_w] = (34, 34, 34)
+    image[card_y : card_y + card_h, second_x : second_x + card_w] = (34, 34, 34)
+
+    video_x = first_x + 320
+    video_w = 360
+    image[card_y : card_y + card_h, video_x : video_x + video_w] = (22, 22, 30)
+    cv2.ellipse(image, (video_x + 185, card_y + 260), (95, 135), 0, 0, 360, (115, 155, 185), -1)
+    cv2.rectangle(image, (second_x + 320, card_y + 180), (second_x + 615, card_y + 250), (34, 34, 34), -1)
+    cv2.putText(
+        image,
+        "Dennis",
+        (second_x + 320, card_y + 295),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        2.5,
+        (245, 245, 245),
+        6,
+    )
+
+    for badge_x, label in ((first_x + 8, "Dennis Geronimo"), (second_x + 8, "Dennis")):
+        badge_y = card_y + card_h - 30
+        badge_w = 195 if "Geronimo" in label else 100
+        cv2.rectangle(image, (badge_x, badge_y), (badge_x + badge_w, badge_y + 28), (35, 35, 35), -1)
+        cv2.circle(image, (badge_x + 13, badge_y + 14), 8, (45, 45, 235), -1)
+        cv2.putText(
+            image,
+            label,
+            (badge_x + 30, badge_y + 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            (245, 245, 245),
+            2,
+        )
+
+    detector = ZoomGalleryDetector()
+
+    tiles = detector.detect(image, source_key="zoom")
+
+    assert len(tiles) == 2
+    assert tiles[0].x <= first_x + 15
+    assert abs(tiles[0].width - card_w) < 60
+    assert abs(tiles[0].height - card_h) < 60
+    assert tiles[1].x >= second_x - 20
+    assert abs(tiles[1].width - card_w) < 60
+
+
+def test_detector_uses_gallery_rectangles_before_inner_fragments():
+    image = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    image[:, :] = (17, 20, 22)
+    image[:78, :] = (43, 43, 45)
+    image[995:, :] = (2, 2, 3)
+
+    card_y = 270
+    card_h = 504
+    card_w = 896
+    first_x = 64
+    second_x = first_x + card_w
+
+    image[card_y : card_y + card_h, first_x : second_x + card_w] = (34, 34, 34)
+    cv2.rectangle(image, (first_x + 330, card_y + 92), (first_x + 575, card_y + 337), (92, 142, 180), -1)
+    cv2.ellipse(image, (first_x + 460, card_y + 250), (78, 116), 0, 0, 360, (118, 160, 195), -1)
+    cv2.rectangle(image, (second_x + 310, card_y + 138), (second_x + 620, card_y + 300), (28, 28, 36), -1)
+    cv2.circle(image, (second_x + 465, card_y + 238), 85, (78, 118, 170), -1)
+
+    detector = ZoomGalleryDetector()
+
+    tiles = detector.detect(image, source_key="zoom")
+
+    assert len(tiles) == 2
+    assert [tile.debug_reason for tile in tiles] == ["gallery-rectangle-split", "gallery-rectangle-split"]
+    assert abs(tiles[0].x - first_x) < 20
+    assert abs(tiles[0].width - card_w) < 30
+    assert abs(tiles[0].height - card_h) < 30
+    assert abs(tiles[1].x - second_x) < 20
+    assert abs(tiles[1].width - card_w) < 30
+
+
 def test_tracker_keeps_ids_when_gallery_layout_changes():
     detector = ZoomGalleryDetector()
     tracker = ParticipantTracker()
