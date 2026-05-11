@@ -1,4 +1,5 @@
 import ctypes
+from threading import Event, Lock
 from ctypes import wintypes
 from time import time
 from typing import Optional, Tuple
@@ -13,11 +14,17 @@ from image_utils import blank_image
 from performance import get_logger
 from win32_utils import get_desktop_window, get_shell_window
 
+try:
+    from windows_capture import WindowsCapture as NativeWindowsCapture
+except Exception:
+    NativeWindowsCapture = None
+
 
 logger = get_logger()
 
 PW_RENDERFULLCONTENT = 0x00000002
 DEFAULT_CAPTURE_SIZE = (640, 360)
+WINDOW_GRAPHICS_TIMEOUT_SECONDS = 0.15
 
 
 class RECT(ctypes.Structure):
@@ -29,6 +36,88 @@ class RECT(ctypes.Structure):
     ]
 
 
+class WindowsGraphicsCaptureBackend:
+    """Capture one HWND through Windows Graphics Capture without desktop occlusion."""
+
+    def __init__(self, hwnd: int, target_fps: int = 30):
+        self.hwnd = int(hwnd or 0)
+        self.target_fps = max(1, int(target_fps))
+        self._capture = None
+        self._control = None
+        self._frame = None
+        self._lock = Lock()
+        self._first_frame = Event()
+        self._closed = False
+        self._last_error = ""
+
+    @property
+    def last_error(self) -> str:
+        return self._last_error
+
+    @property
+    def is_available(self) -> bool:
+        return NativeWindowsCapture is not None
+
+    def start(self) -> bool:
+        if self._control is not None:
+            return True
+        if NativeWindowsCapture is None or not self.hwnd:
+            self._last_error = "windows-capture package is not available"
+            return False
+
+        try:
+            interval_ms = max(1, int(round(1000 / self.target_fps)))
+            capture = NativeWindowsCapture(
+                cursor_capture=False,
+                draw_border=False,
+                minimum_update_interval=interval_ms,
+                window_hwnd=self.hwnd,
+            )
+
+            @capture.event
+            def on_frame_arrived(frame, _capture_control):
+                image = np.ascontiguousarray(frame.frame_buffer[:, :, :3]).copy()
+                with self._lock:
+                    self._frame = image
+                self._first_frame.set()
+
+            @capture.event
+            def on_closed():
+                self._closed = True
+
+            self._capture = capture
+            self._control = capture.start_free_threaded()
+            return True
+        except Exception as error:
+            self._last_error = str(error)
+            self.stop()
+            return False
+
+    def get_frame(self, timeout: float = 0.0) -> Optional[np.ndarray]:
+        if self._closed:
+            return None
+        if not self.start():
+            return None
+        if timeout > 0:
+            self._first_frame.wait(timeout)
+        with self._lock:
+            if self._frame is None:
+                return None
+            return self._frame.copy()
+
+    def stop(self) -> None:
+        try:
+            if self._control is not None and not self._control.is_finished():
+                self._control.stop()
+        except Exception:
+            pass
+        self._capture = None
+        self._control = None
+        self._frame = None
+        self._first_frame.clear()
+        self._closed = False
+
+
 class WindowCapture:
     def __init__(self, hwnd: str = "", window_name: str = ""):
         self.hwnd = self._resolve_hwnd(hwnd, window_name)
@@ -38,7 +127,9 @@ class WindowCapture:
         self._compatible_dc = None
         self._bitmap = None
         self._selected_bitmap = None
+        self._graphics_capture: Optional[WindowsGraphicsCaptureBackend] = None
         self._last_error_at = 0.0
+        self._last_backend_warning_at = 0.0
         self._refresh_window_size()
 
     @staticmethod
@@ -66,6 +157,7 @@ class WindowCapture:
         self.freeResources()
         self.hwnd = self._resolve_hwnd(hwnd, window_name)
         self._cached_size = None
+        self._graphics_capture = None
         self._refresh_window_size()
 
     def startFramePool(self):
@@ -129,14 +221,23 @@ class WindowCapture:
             if not self._refresh_window_size():
                 return self.newBlankImageSize((self.w, self.h))
             if win32gui.IsIconic(self.hwnd):
+                self._stop_graphics_capture()
                 return self.newBlankImageSize((self.w, self.h))
 
-            image = self._capture_selected_rect_from_screen()
-            if self._looks_blank(image):
-                print_window_image = self._capture_with_print_window()
-                if print_window_image is not None:
-                    image = print_window_image
-            return image
+            image = self._capture_with_windows_graphics_capture()
+            if image is not None:
+                return image
+
+            image = self._capture_with_print_window()
+            if image is not None:
+                return image
+
+            self._log_backend_warning(
+                "Selected window did not provide a capturable frame. "
+                "If this is Zoom with DirectX 12/hardware acceleration, Windows Graphics Capture is required; "
+                "otherwise disable Zoom video rendering hardware acceleration and reselect the window."
+            )
+            return self.newBlankImageSize((max(1, self.w), max(1, self.h)))
         except Exception as error:
             now = time()
             if now - self._last_error_at > 2:
@@ -144,6 +245,26 @@ class WindowCapture:
                 self._last_error_at = now
             self.freeResources()
             return self.newBlankImageSize((max(1, self.w), max(1, self.h)))
+
+    def _capture_with_windows_graphics_capture(self) -> Optional[np.ndarray]:
+        if NativeWindowsCapture is None:
+            self._log_backend_warning("Windows Graphics Capture backend is unavailable; falling back to PrintWindow.")
+            return None
+
+        if self._graphics_capture is None or self._graphics_capture.hwnd != self.hwnd:
+            self._graphics_capture = WindowsGraphicsCaptureBackend(self.hwnd)
+
+        image = self._graphics_capture.get_frame(WINDOW_GRAPHICS_TIMEOUT_SECONDS)
+        if image is None:
+            self._log_backend_warning(
+                "Windows Graphics Capture has not produced a frame yet: "
+                f"{self._graphics_capture.last_error or 'waiting for first frame'}"
+            )
+            return None
+
+        if self._looks_blank(image):
+            return None
+        return image
 
     def _capture_with_print_window(self) -> Optional[np.ndarray]:
         window_dc = win32gui.GetWindowDC(self.hwnd)
@@ -203,6 +324,7 @@ class WindowCapture:
         self._selected_bitmap = self._compatible_dc.SelectObject(self._bitmap)
 
     def freeResources(self):
+        self._stop_graphics_capture()
         try:
             if self._compatible_dc is not None:
                 if self._selected_bitmap is not None:
@@ -218,6 +340,20 @@ class WindowCapture:
         self._compatible_dc = None
         self._bitmap = None
         self._selected_bitmap = None
+
+    def _stop_graphics_capture(self) -> None:
+        try:
+            if self._graphics_capture is not None:
+                self._graphics_capture.stop()
+        except Exception:
+            pass
+        self._graphics_capture = None
+
+    def _log_backend_warning(self, message: str) -> None:
+        now = time()
+        if now - self._last_backend_warning_at > 5:
+            logger.warning(message)
+            self._last_backend_warning_at = now
 
     @staticmethod
     def getScreeDimention():
