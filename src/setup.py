@@ -1,11 +1,29 @@
 from setuptools import setup
-from Cython.Build import cythonize
-import numpy
-# import cv2
-# import threading
-# import math
+
 
 setup(
-    ext_modules = cythonize("./*.pyx"),
-    include_dirs=[numpy.get_include()]
+    name="merge-zoom-manager",
+    version="1.7.0",
+    py_modules=[
+        "CaptureProcessor",
+        "WindowCaptureConfiguration",
+        "WindowRenderer",
+        "WindowRendererGroupPreview",
+        "WindowRendererPreview",
+        "captureRunnerOnThread",
+        "image_utils",
+        "main",
+        "models",
+        "participant_detection",
+        "participant_tracking",
+        "performance",
+        "win32Manager",
+        "windowCaptureHandler",
+    ],
+    install_requires=[
+        "numpy",
+        "opencv-python",
+        "Pillow",
+        "pywin32",
+    ],
 )

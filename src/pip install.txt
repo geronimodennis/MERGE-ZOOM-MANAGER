@@ -1,13 +1,7 @@
-pip install opencv-python
-pip install pywin32
-pip install pywinauto
-python3 -m pip install --upgrade pip
-python3 -m pip install --upgrade Pillow
-pip install pyinstaller
-pip install numba
+python -m pip install --upgrade pip
+python -m pip install -r ..\requirements.txt
+python -m pip install -r ..\requirements-dev.txt
 
-#pyinstaller --onefile --noconsole WindowCaptureConfiguration.py
-#pyinstaller --onefile --noconsole WindowCaptureConfiguration.spec
-
-#python setup.py build_ext --inplace
+# Build from the src directory:
+# pyinstaller --clean --noconfirm WindowCaptureConfiguration.spec
 

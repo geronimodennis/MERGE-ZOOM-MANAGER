@@ -1,4 +1,3 @@
-from pywinauto import Desktop
 import win32gui
 
 titles = []
