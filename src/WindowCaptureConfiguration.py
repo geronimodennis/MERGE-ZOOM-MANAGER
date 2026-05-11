@@ -192,8 +192,14 @@ class WindowCaptureConfiguration:
         if messagebox.askokcancel(title="Quit", message="Do you want to quit?"):
             if self.renderWindow is not None:
                 self.renderWindow.on_closing()
-            self.window.destroy()
+                self.renderWindow = None
+            for config in self._captureConfiguration:
+                capture_handler = config.get("captureHandler")
+                if capture_handler is not None and hasattr(capture_handler, "freeResources"):
+                    capture_handler.freeResources()
             cv2.destroyAllWindows()
+            self.window.quit()
+            self.window.destroy()
 
 
 if __name__ == "__main__":

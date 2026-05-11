@@ -71,18 +71,25 @@ class WindowRenderer:
         self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def on_closing(self):
+        self.isRendering = False
         if self.captureRunnerOnThread is not None:
             self.captureRunnerOnThread.stopFramePool()
+            self.captureRunnerOnThread = None
         for pin_window in list(self.pinWindows):
             pin_window.close()
+        self.pinWindows.clear()
         if self.renderPreviewWindow is not None:
             self.renderPreviewWindow.close()
+            self.renderPreviewWindow = None
         if self.renderGroupPreviewWindow is not None:
             self.renderGroupPreviewWindow.close()
+            self.renderGroupPreviewWindow = None
         if self.roiEditorWindow is not None:
             self.roiEditorWindow.close()
-        self.window.destroy()
-        self.isRendering = False
+            self.roiEditorWindow = None
+        if self.window is not None and self.window.winfo_exists():
+            self.window.destroy()
+        self.window = None
 
     def addContextMenu(self):
         self.window.menu = TK.Menu(self.window, tearoff=0)

@@ -161,6 +161,24 @@ class CaptureProcessor:
                     self.last_rois[config_source_key] = self.detector._gallery_search_roi(image)
         return changed
 
+    def close(self):
+        with self._lock:
+            self.last_tiles = []
+            self.last_screenshots = {}
+            self.last_rois = {}
+
+        for config in self._captureConfigurationList:
+            capture_handler = config.get("captureHandler")
+            if capture_handler is None:
+                continue
+            try:
+                if hasattr(capture_handler, "freeResources"):
+                    capture_handler.freeResources()
+                elif hasattr(capture_handler, "stopFramePool"):
+                    capture_handler.stopFramePool()
+            except Exception:
+                pass
+
     def _stack_debug_overlays(self, overlays):
         if len(overlays) == 1:
             return overlays[0], [(0, 0)]

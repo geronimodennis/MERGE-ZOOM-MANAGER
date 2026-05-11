@@ -164,6 +164,7 @@ class WindowCapture:
         return self
 
     def stopFramePool(self):
+        self.freeResources()
         return self
 
     def is_valid(self) -> bool:

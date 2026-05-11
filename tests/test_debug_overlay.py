@@ -83,9 +83,13 @@ class FakeCaptureHandler:
 
     def __init__(self, image):
         self.image = image
+        self.closed = False
 
     def get_screenshot(self):
         return self.image.copy()
+
+    def freeResources(self):
+        self.closed = True
 
 
 def test_capture_processor_applies_manual_roi_to_detection_and_overlay():
@@ -104,6 +108,60 @@ def test_capture_processor_applies_manual_roi_to_detection_and_overlay():
     assert len(tiles) == 1
     assert processor.last_rois["zoom"] == (0, 0, 480, 360)
     assert overlay is not None
+
+
+def test_capture_processor_close_releases_capture_handlers_and_cached_frames():
+    image = np.zeros((120, 200, 3), dtype=np.uint8)
+    handler = FakeCaptureHandler(image)
+    processor = CaptureProcessor([{"winName": "zoom", "captureHandler": handler}], chromaKey=(0, 177, 64))
+    with processor._lock:
+        processor.last_screenshots = {"zoom": image}
+        processor.last_rois = {"zoom": (0, 0, 200, 120)}
+
+    processor.close()
+
+    assert handler.closed
+    assert processor.last_screenshots == {}
+    assert processor.last_rois == {}
+
+
+class FakeWorker:
+    def __init__(self):
+        self.join_timeout = None
+
+    def is_alive(self):
+        return True
+
+    def join(self, timeout=None):
+        self.join_timeout = timeout
+
+
+class FakeClosableProcessor:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def test_runner_stop_joins_worker_and_closes_processor():
+    runner = CaptureRunnerOnThread([], (0, 177, 64))
+    fake_processor = FakeClosableProcessor()
+    fake_worker = FakeWorker()
+    runner.capPorcessor = fake_processor
+    runner._worker = fake_worker
+    runner._running = True
+    runner._debug_frame = np.zeros((1, 1, 3), dtype=np.uint8)
+    runner._frame = np.zeros((1, 1, 3), dtype=np.uint8)
+
+    runner.stopFramePool()
+
+    assert not runner._running
+    assert fake_worker.join_timeout == 2.0
+    assert fake_processor.closed
+    assert runner._worker is None
+    assert runner._debug_frame is None
+    assert runner._frame is None
 
 
 def test_runner_publishes_fresh_debug_frames_when_enabled():

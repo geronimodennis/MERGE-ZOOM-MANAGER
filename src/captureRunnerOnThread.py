@@ -1,6 +1,6 @@
 from collections import deque
 from dataclasses import dataclass
-from threading import Lock, Thread
+from threading import Lock, Thread, current_thread
 from time import perf_counter
 from typing import Iterable, List, Optional
 
@@ -183,8 +183,19 @@ class CaptureRunnerOnThread:
 
     def stopFramePool(self):
         self._running = False
+        worker = self._worker
+        if worker is not None and worker is not current_thread() and worker.is_alive():
+            worker.join(timeout=2.0)
+        self._worker = None
+        if self.capPorcessor is not None and hasattr(self.capPorcessor, "close"):
+            self.capPorcessor.close()
         self._framePool.clear()
         self._groupFramePool.clear()
+        with self._lock:
+            self._debug_frame = None
+            self._debug_cells = []
+            self._frame = None
+            self._groupFrame = None
 
     def stopGroupImagesPool(self):
         self._groupFramePool.clear()
