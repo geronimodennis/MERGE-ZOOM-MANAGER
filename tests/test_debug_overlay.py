@@ -32,7 +32,8 @@ def test_live_debug_overlay_draws_tile_rectangles_and_click_cells():
     assert frame is not None
     assert cells == [{"tile_id": 7, "index": 0, "source_key": "zoom", "rect": (20, 30, 80, 45)}]
     assert not np.array_equal(frame, image)
-    assert tuple(int(value) for value in frame[30, 20]) == (80, 220, 80)
+    assert tuple(int(value) for value in frame[30, 20]) == (255, 80, 30)
+    assert tuple(int(value) for value in frame[53, 0]) == (80, 220, 80)
 
 
 def test_live_debug_overlay_stacks_multiple_capture_sources():

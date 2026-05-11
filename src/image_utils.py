@@ -9,6 +9,8 @@ from models import CompositeFrame, ParticipantTile
 
 
 RGBColor = Tuple[int, int, int]
+DEBUG_ROI_COLOR = (80, 220, 80)
+DEBUG_PARTICIPANT_COLOR = (255, 80, 30)
 
 
 def rgb_to_bgr(color: Optional[RGBColor]) -> Tuple[int, int, int]:
@@ -157,7 +159,7 @@ def draw_debug_overlay(
     overlay = image.copy()
     if roi is not None:
         roi_x, roi_y, roi_width, roi_height = roi
-        cv2.rectangle(overlay, (roi_x, roi_y), (roi_x + roi_width, roi_y + roi_height), (255, 170, 40), 2)
+        cv2.rectangle(overlay, (roi_x, roi_y), (roi_x + roi_width, roi_y + roi_height), DEBUG_ROI_COLOR, 2)
         roi_label = f"gallery roi x={roi_x} y={roi_y} w={roi_width} h={roi_height}"
         cv2.putText(
             overlay,
@@ -165,7 +167,7 @@ def draw_debug_overlay(
             (roi_x + 6, max(18, roi_y + 18)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
-            (255, 170, 40),
+            DEBUG_ROI_COLOR,
             2,
         )
 
@@ -175,7 +177,7 @@ def draw_debug_overlay(
 
     for tile in tiles:
         x, y, width, height = tile.rect
-        color = (80, 220, 80) if tile.track_id is not None else (0, 200, 255)
+        color = DEBUG_PARTICIPANT_COLOR
         cv2.rectangle(overlay, (x, y), (x + width, y + height), color, 2)
         label_parts = [f"#{tile.track_id if tile.track_id is not None else '?'}", f"{tile.confidence:.2f}"]
         if tile.debug_reason:

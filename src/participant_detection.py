@@ -58,6 +58,7 @@ class ZoomGalleryDetector:
             candidates = zoom_layout_candidates
         else:
             candidates = self._consolidate_candidates(image, candidates)
+        candidates.extend(self._detect_from_centered_names(image, gallery_roi, candidates))
         candidates = [candidate for candidate in candidates if self._rect_inside_roi(candidate.rect, gallery_roi)]
         candidates = self._dedupe(candidates)
         candidates = self._remove_containing_boxes(candidates)
@@ -275,6 +276,9 @@ class ZoomGalleryDetector:
         content_candidates: List[DetectionCandidate],
         roi: Rect | None = None,
     ) -> List[DetectionCandidate]:
+        if not content_candidates:
+            return []
+
         gallery_roi = self._normalize_roi(image, roi)
         badges = self._find_zoom_name_badges(image, gallery_roi)
         if not badges:
@@ -322,6 +326,152 @@ class ZoomGalleryDetector:
                     candidates.append(DetectionCandidate(rect, 0.96, "zoom-name-badge-layout"))
 
         return self._dedupe(candidates)
+
+    def _detect_from_centered_names(
+        self,
+        image: np.ndarray,
+        roi: Rect,
+        existing_candidates: List[DetectionCandidate],
+    ) -> List[DetectionCandidate]:
+        labels = self._find_centered_name_labels(image, roi)
+        if not labels:
+            return []
+
+        uncovered_labels = [label for label in labels if not self._label_center_inside_candidates(label, existing_candidates)]
+        if not uncovered_labels:
+            return []
+
+        roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi)
+        image_height, image_width = image.shape[:2]
+        known_size = self._probable_tile_size_from_candidates(existing_candidates)
+        row_groups = self._group_badges_by_row(uncovered_labels, max_gap=max(18, roi_height // 18))
+        row_centers = [float(np.mean([label[1] + label[3] / 2.0 for label in row])) for row in row_groups]
+
+        candidates: List[DetectionCandidate] = []
+        for row_index, row_labels in enumerate(row_groups):
+            row_labels.sort(key=lambda rect: rect[0])
+            row_center_y = row_centers[row_index]
+            if known_size is None:
+                tile_width, tile_height = self._estimate_tile_size_for_name_row(row_labels, row_index, row_centers, roi_width, roi_height)
+            else:
+                tile_width, tile_height = known_size
+
+            if tile_width <= 0 or tile_height <= 0:
+                continue
+
+            for label in row_labels:
+                label_center_x = label[0] + label[2] / 2.0
+                label_center_y = label[1] + label[3] / 2.0 if len(row_groups) == 1 else row_center_y
+                rect = self._rect_centered_in_roi(label_center_x, label_center_y, tile_width, tile_height, (roi_x, roi_y, roi_width, roi_height))
+                if not self._is_valid_rect(rect, image_width, image_height):
+                    continue
+                if any(self._iou(rect, candidate.rect) > 0.45 for candidate in existing_candidates):
+                    continue
+                candidates.append(DetectionCandidate(rect, 0.74, "center-name-layout"))
+
+        return self._dedupe(candidates)
+
+    def _find_centered_name_labels(self, image: np.ndarray, roi: Rect) -> List[Rect]:
+        roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi)
+        search_image = image[roi_y : roi_y + roi_height, roi_x : roi_x + roi_width]
+        if search_image.size == 0:
+            return []
+
+        image_height, image_width = search_image.shape[:2]
+        gray = cv2.cvtColor(search_image, cv2.COLOR_BGR2GRAY)
+        bright_text = (gray > 145).astype(np.uint8) * 255
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(19, image_width // 80), max(5, image_height // 180)))
+        mask = cv2.dilate(bright_text, kernel, iterations=1)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        labels: List[Rect] = []
+        for contour in contours:
+            x, y, width, height = cv2.boundingRect(contour)
+            if not (35 <= width <= image_width * 0.40):
+                continue
+            if not (12 <= height <= max(80, image_height * 0.12)):
+                continue
+            if y < image_height * 0.04 or y + height > image_height * 0.96:
+                continue
+
+            absolute_rect = (x + roi_x, y + roi_y, width, height)
+            labels.append(absolute_rect)
+
+        return self._dedupe_badges(labels)
+
+    def _probable_tile_size_from_candidates(self, candidates: List[DetectionCandidate]) -> Tuple[int, int] | None:
+        cardish = [candidate.rect for candidate in candidates if self._is_cardish_aspect(candidate.rect)]
+        if not cardish:
+            return None
+        widths = np.array([rect[2] for rect in cardish], dtype=np.float32)
+        heights = np.array([rect[3] for rect in cardish], dtype=np.float32)
+        return int(round(float(np.median(widths)))), int(round(float(np.median(heights))))
+
+    def _estimate_tile_size_for_name_row(
+        self,
+        row_labels: List[Rect],
+        row_index: int,
+        row_centers: List[float],
+        roi_width: int,
+        roi_height: int,
+    ) -> Tuple[int, int]:
+        visual_gap = max(8, int(roi_width * 0.012))
+        if len(row_labels) >= 2:
+            centers = sorted(label[0] + label[2] / 2.0 for label in row_labels)
+            tile_width = int(round(float(np.median(np.diff(centers))) - visual_gap))
+            tile_height = int(round(tile_width * 9.0 / 16.0))
+        else:
+            row_height = self._estimate_row_height(row_index, row_centers, roi_height)
+            tile_height = max(1, row_height - visual_gap)
+            tile_width = int(round(tile_height * 16.0 / 9.0))
+
+        row_height = self._estimate_row_height(row_index, row_centers, roi_height)
+        if tile_height > row_height - visual_gap:
+            tile_height = max(1, row_height - visual_gap)
+            tile_width = int(round(tile_height * 16.0 / 9.0))
+
+        if tile_width > roi_width:
+            tile_width = roi_width
+            tile_height = int(round(tile_width * 9.0 / 16.0))
+        if tile_height > roi_height:
+            tile_height = roi_height
+            tile_width = int(round(tile_height * 16.0 / 9.0))
+
+        return max(1, tile_width), max(1, tile_height)
+
+    @staticmethod
+    def _estimate_row_height(row_index: int, row_centers: List[float], roi_height: int) -> int:
+        if len(row_centers) <= 1:
+            return roi_height
+        if row_index == 0:
+            spacing = row_centers[1] - row_centers[0]
+        elif row_index == len(row_centers) - 1:
+            spacing = row_centers[-1] - row_centers[-2]
+        else:
+            spacing = min(row_centers[row_index] - row_centers[row_index - 1], row_centers[row_index + 1] - row_centers[row_index])
+        return max(1, int(round(spacing)))
+
+    @staticmethod
+    def _rect_centered_in_roi(center_x: float, center_y: float, width: int, height: int, roi: Rect) -> Rect:
+        roi_x, roi_y, roi_width, roi_height = roi
+        x = int(round(center_x - width / 2.0))
+        y = int(round(center_y - height / 2.0))
+        x = max(roi_x, min(x, roi_x + roi_width - 1))
+        y = max(roi_y, min(y, roi_y + roi_height - 1))
+        width = min(width, roi_x + roi_width - x)
+        height = min(height, roi_y + roi_height - y)
+        return x, y, max(1, int(width)), max(1, int(height))
+
+    @staticmethod
+    def _label_center_inside_candidates(label: Rect, candidates: List[DetectionCandidate]) -> bool:
+        center_x = label[0] + label[2] / 2.0
+        center_y = label[1] + label[3] / 2.0
+        for candidate in candidates:
+            x, y, width, height = candidate.rect
+            if x <= center_x <= x + width and y <= center_y <= y + height:
+                return True
+        return False
 
     def _find_zoom_name_badges(self, image: np.ndarray, roi: Rect | None = None) -> List[Rect]:
         roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi)

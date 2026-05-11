@@ -53,6 +53,16 @@ def full_frame_roi(image):
     return 0, 0, width, height
 
 
+def put_centered_text(image, text, center):
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 1.15
+    thickness = 2
+    text_size, baseline = cv2.getTextSize(text, font, scale, thickness)
+    x = int(round(center[0] - text_size[0] / 2))
+    y = int(round(center[1] + text_size[1] / 2))
+    cv2.putText(image, text, (x, y), font, scale, (235, 235, 235), thickness)
+
+
 def test_detector_finds_dynamic_gallery_tiles():
     image, _rects = synthetic_gallery()
     detector = ZoomGalleryDetector()
@@ -266,6 +276,23 @@ def test_detector_accepts_manual_roi_override():
 
     assert default_tiles == []
     assert len(manual_tiles) == 1
+
+
+def test_detector_infers_camera_off_tiles_from_centered_names():
+    image = np.zeros((600, 1000, 3), dtype=np.uint8)
+    image[:, :] = (17, 20, 22)
+    put_centered_text(image, "Alice", (250, 300))
+    put_centered_text(image, "Bob Martin", (750, 300))
+    detector = ZoomGalleryDetector()
+
+    tiles = detector.detect(image, source_key="zoom", roi=full_frame_roi(image))
+
+    assert len(tiles) == 2
+    assert [tile.debug_reason for tile in tiles] == ["center-name-layout", "center-name-layout"]
+    assert all(430 <= tile.width <= 500 for tile in tiles)
+    assert all(240 <= tile.height <= 290 for tile in tiles)
+    assert tiles[0].x < 40
+    assert 480 <= tiles[1].x <= 530
 
 
 def test_tracker_keeps_ids_when_gallery_layout_changes():
