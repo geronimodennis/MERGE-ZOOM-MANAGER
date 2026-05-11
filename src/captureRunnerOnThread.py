@@ -233,6 +233,9 @@ class CaptureRunnerOnThread:
         missing = self.capPorcessor.get_missing_count(track_ids)
         return composite, missing
 
+    def get_live_debug_overlay(self):
+        return self.capPorcessor.build_live_debug_overlay()
+
     def get_snapshot(self) -> CaptureSnapshot:
         with self._lock:
             return CaptureSnapshot(

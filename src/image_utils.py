@@ -141,12 +141,42 @@ def find_cell_at(cells: Iterable[dict], x: float, y: float) -> Optional[dict]:
     return None
 
 
-def draw_debug_overlay(image: np.ndarray, tiles: Sequence[ParticipantTile]) -> np.ndarray:
+def draw_debug_overlay(
+    image: np.ndarray,
+    tiles: Sequence[ParticipantTile],
+    title: Optional[str] = None,
+    roi: Optional[Tuple[int, int, int, int]] = None,
+) -> np.ndarray:
     overlay = image.copy()
+    if roi is not None:
+        roi_x, roi_y, roi_width, roi_height = roi
+        cv2.rectangle(overlay, (roi_x, roi_y), (roi_x + roi_width, roi_y + roi_height), (255, 170, 40), 2)
+        cv2.putText(
+            overlay,
+            "gallery roi",
+            (roi_x + 6, max(18, roi_y + 18)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 170, 40),
+            2,
+        )
+
+    if title:
+        cv2.rectangle(overlay, (0, 0), (min(overlay.shape[1] - 1, 620), 28), (0, 0, 0), -1)
+        cv2.putText(overlay, title, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (245, 245, 245), 2)
+
     for tile in tiles:
         x, y, width, height = tile.rect
         color = (80, 220, 80) if tile.track_id is not None else (0, 200, 255)
         cv2.rectangle(overlay, (x, y), (x + width, y + height), color, 2)
-        label = f"#{tile.track_id if tile.track_id is not None else '?'} {tile.confidence:.2f}"
-        cv2.putText(overlay, label, (x + 4, max(16, y + 16)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        label_parts = [f"#{tile.track_id if tile.track_id is not None else '?'}", f"{tile.confidence:.2f}"]
+        if tile.debug_reason:
+            label_parts.append(tile.debug_reason)
+        label_parts.append(f"{width}x{height}")
+        label = " ".join(label_parts)
+        label_y = max(18, y + 18)
+        label_width = min(overlay.shape[1] - x - 1, max(80, len(label) * 8))
+        if label_width > 0:
+            cv2.rectangle(overlay, (x, max(0, label_y - 15)), (x + label_width, label_y + 4), (0, 0, 0), -1)
+        cv2.putText(overlay, label, (x + 4, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
     return overlay

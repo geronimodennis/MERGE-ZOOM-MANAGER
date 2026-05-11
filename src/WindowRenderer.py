@@ -27,6 +27,7 @@ class WindowRenderer:
         self.currentCells = []
         self.currentSourceSize = (0, 0)
         self.displayRect = (0, 0, 1, 1)
+        self.showDebugOverlay = False
         self.initializeObject(parent, background, captureConfiguration)
 
     def initializeObject(self, parent, background, captureConfiguration):
@@ -86,7 +87,8 @@ class WindowRenderer:
         self.window.menu.add_command(label="Open Group Pin Window", command=self.menu_OpenGroupPreview)
         self.window.menu.add_command(label="Add Selected To Group Pin", command=self.menu_OpenToGroupPreview)
         self.window.menu.add_separator()
-        self.window.menu.add_command(label="Show Detection Debug Overlay", command=self.menu_ShowDebugOverlay)
+        self.window.menu.add_command(label="Toggle Live Detection Overlay", command=self.menu_ToggleLiveDebugOverlay)
+        self.window.menu.add_command(label="Show Detection Debug Snapshot", command=self.menu_ShowDebugOverlay)
         self.window.menu.add_separator()
         self.window.menu.add_command(label="Clear Group Pins", command=self.menu_ClearGroupPreview)
 
@@ -101,20 +103,32 @@ class WindowRenderer:
             return
 
         snapshot = self.captureRunnerOnThread.get_snapshot()
-        if snapshot.frame is not None:
+        frame = snapshot.frame
+        cells = snapshot.cells
+        debug_message = ""
+        if self.showDebugOverlay:
+            debug_frame, debug_cells = self.captureRunnerOnThread.get_live_debug_overlay()
+            if debug_frame is not None:
+                frame = debug_frame
+                cells = debug_cells
+                debug_message = "LIVE DEBUG   "
+            else:
+                debug_message = "LIVE DEBUG WAITING   "
+
+        if frame is not None:
             canvas_width = max(1, self.window.canvas.winfo_width())
             canvas_height = max(1, self.window.canvas.winfo_height())
-            frame_height, frame_width = snapshot.frame.shape[:2]
+            frame_height, frame_width = frame.shape[:2]
 
-            self.currentImage = cv_to_photo_image(snapshot.frame, (canvas_width, canvas_height), self.background)
-            self.currentCells = snapshot.cells
+            self.currentImage = cv_to_photo_image(frame, (canvas_width, canvas_height), self.background)
+            self.currentCells = cells
             self.currentSourceSize = (frame_width, frame_height)
             self.displayRect = aspect_fit_rect(self.currentSourceSize, (canvas_width, canvas_height))
             x, y, _width, _height = self.displayRect
             self.window.canvas.coords(self.window.canvasImageConfigId, x, y)
             self.window.canvas.itemconfig(self.window.canvasImageConfigId, image=self.currentImage)
 
-            text = "Tiles: {0}   Capture FPS: {1:.1f}".format(len(snapshot.tiles), snapshot.capture_fps)
+            text = "{0}Tiles: {1}   Capture FPS: {2:.1f}".format(debug_message, len(snapshot.tiles), snapshot.capture_fps)
             if snapshot.missing_pins:
                 text += "   Missing pinned: {0}".format(snapshot.missing_pins)
             self.window.canvas.itemconfig(self.window.canvasTextConfigId, text=text)
@@ -149,8 +163,8 @@ class WindowRenderer:
         self._select_tile_at(event.x, event.y)
 
     def windowRClick(self, event):
-        if self._select_tile_at(event.x, event.y) is not None:
-            self.window.menu.tk_popup(event.x_root, event.y_root)
+        self._select_tile_at(event.x, event.y)
+        self.window.menu.tk_popup(event.x_root, event.y_root)
 
     def _require_selected_tile(self):
         if self.currentTileId is None:
@@ -213,8 +227,11 @@ class WindowRenderer:
     def menu_ClearGroupPreview(self):
         self.captureRunnerOnThread.clearPinnedTiles()
 
+    def menu_ToggleLiveDebugOverlay(self):
+        self.showDebugOverlay = not self.showDebugOverlay
+
     def menu_ShowDebugOverlay(self):
-        overlay = self.captureRunnerOnThread.capPorcessor.build_debug_overlay()
+        overlay, _cells = self.captureRunnerOnThread.get_live_debug_overlay()
         if overlay is None:
             messagebox.showinfo(title="Detection debug", message="No detection overlay is available yet.")
             return
