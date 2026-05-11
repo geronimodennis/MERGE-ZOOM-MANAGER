@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from image_utils import stack_tiles
 from models import ParticipantTile
-from participant_detection import ZoomGalleryDetector
+from participant_detection import DetectionCandidate, ZoomGalleryDetector
 from participant_tracking import ParticipantTracker
 
 
@@ -85,6 +85,32 @@ def test_detector_consolidates_single_tile_content_fragments():
     assert len(tiles) == 1
     assert tiles[0].width > 500
     assert tiles[0].height > 300
+
+
+def test_detector_cleanup_keeps_outer_card_and_drops_inner_fragments():
+    detector = ZoomGalleryDetector()
+    candidates = [
+        DetectionCandidate((80, 90, 720, 405), 0.92, "outer-card"),
+        DetectionCandidate((250, 160, 270, 170), 0.88, "inner-video"),
+        DetectionCandidate((100, 440, 190, 34), 0.86, "name-badge"),
+    ]
+
+    filtered = detector._filter_inconsistent_tile_sizes(detector._remove_containing_boxes(candidates))
+
+    assert [candidate.reason for candidate in filtered] == ["outer-card"]
+
+
+def test_detector_cleanup_drops_multi_tile_container_not_real_tiles():
+    detector = ZoomGalleryDetector()
+    candidates = [
+        DetectionCandidate((40, 100, 1840, 520), 0.75, "row-container"),
+        DetectionCandidate((40, 100, 920, 518), 0.96, "left-card"),
+        DetectionCandidate((960, 100, 920, 518), 0.96, "right-card"),
+    ]
+
+    filtered = detector._remove_containing_boxes(candidates)
+
+    assert [candidate.reason for candidate in filtered] == ["left-card", "right-card"]
 
 
 def test_detector_uses_zoom_name_badges_to_infer_full_cards():

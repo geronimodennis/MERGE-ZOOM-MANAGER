@@ -49,7 +49,9 @@ class ZoomGalleryDetector:
         else:
             candidates = self._consolidate_candidates(image, candidates)
         candidates = [candidate for candidate in candidates if self._rect_inside_roi(candidate.rect, gallery_roi)]
-        candidates = self._remove_containing_boxes(self._dedupe(candidates))
+        candidates = self._dedupe(candidates)
+        candidates = self._remove_containing_boxes(candidates)
+        candidates = self._filter_inconsistent_tile_sizes(candidates)
         candidates.sort(key=lambda item: (item.rect[1], item.rect[0]))
 
         tiles: List[ParticipantTile] = []
@@ -700,19 +702,80 @@ class ZoomGalleryDetector:
         return keep
 
     def _remove_containing_boxes(self, candidates: List[DetectionCandidate]) -> List[DetectionCandidate]:
-        result: List[DetectionCandidate] = []
-        for candidate in candidates:
-            contained = [
+        remove_indexes = set()
+
+        for index, candidate in enumerate(candidates):
+            candidate_area = self._rect_area(candidate.rect)
+            large_contained = [
                 other
                 for other in candidates
                 if other is not candidate
                 and self._contains(candidate.rect, other.rect)
-                and other.rect[2] * other.rect[3] < candidate.rect[2] * candidate.rect[3] * 0.75
+                and self._rect_area(other.rect) >= candidate_area * 0.18
+                and self._is_cardish_aspect(other.rect)
             ]
-            if len(contained) >= 2:
+            if len(large_contained) >= 2:
+                remove_indexes.add(index)
+
+        for index, candidate in enumerate(candidates):
+            if index in remove_indexes:
                 continue
-            result.append(candidate)
-        return result
+            candidate_area = self._rect_area(candidate.rect)
+            for outer_index, outer in enumerate(candidates):
+                if outer_index == index or outer_index in remove_indexes:
+                    continue
+                outer_area = self._rect_area(outer.rect)
+                if candidate_area >= outer_area * 0.75:
+                    continue
+                if self._contains(outer.rect, candidate.rect):
+                    remove_indexes.add(index)
+                    break
+
+        return [candidate for index, candidate in enumerate(candidates) if index not in remove_indexes]
+
+    def _filter_inconsistent_tile_sizes(self, candidates: List[DetectionCandidate]) -> List[DetectionCandidate]:
+        if len(candidates) <= 1:
+            return candidates
+
+        cardish_candidates = [candidate for candidate in candidates if self._is_cardish_aspect(candidate.rect)]
+        if not cardish_candidates:
+            return candidates
+
+        widths = np.array([candidate.rect[2] for candidate in cardish_candidates], dtype=np.float32)
+        heights = np.array([candidate.rect[3] for candidate in cardish_candidates], dtype=np.float32)
+        areas = widths * heights
+        large_half_start = max(0, len(areas) // 2)
+        area_order = np.argsort(areas)
+        large_candidates = [cardish_candidates[index] for index in area_order[large_half_start:]]
+
+        reference_width = float(np.median([candidate.rect[2] for candidate in large_candidates]))
+        reference_height = float(np.median([candidate.rect[3] for candidate in large_candidates]))
+        reference_area = float(np.median([self._rect_area(candidate.rect) for candidate in large_candidates]))
+
+        filtered = []
+        for candidate in candidates:
+            width = candidate.rect[2]
+            height = candidate.rect[3]
+            area = self._rect_area(candidate.rect)
+            if not self._is_cardish_aspect(candidate.rect):
+                continue
+            if area < reference_area * 0.45:
+                continue
+            if width < reference_width * 0.55 and height < reference_height * 0.55:
+                continue
+            filtered.append(candidate)
+
+        return filtered or candidates
+
+    @staticmethod
+    def _rect_area(rect: Rect) -> int:
+        return max(0, int(rect[2])) * max(0, int(rect[3]))
+
+    @staticmethod
+    def _is_cardish_aspect(rect: Rect) -> bool:
+        _x, _y, width, height = rect
+        aspect = width / float(max(1, height))
+        return 1.05 <= aspect <= 2.55
 
     @staticmethod
     def _contains(outer: Rect, inner: Rect) -> bool:
