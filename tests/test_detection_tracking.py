@@ -303,6 +303,33 @@ def test_detector_rejects_participant_rectangles_larger_than_max_bound():
     assert not detector._is_valid_rect((0, 0, MAX_PARTICIPANT_RECT_WIDTH, MAX_PARTICIPANT_RECT_HEIGHT + 1), 1920, 1080)
 
 
+def test_detector_uses_greenish_light_rectangle_when_normal_detection_fails():
+    image = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    image[:, :] = (17, 20, 22)
+    image[260:820, 450:1450] = (112, 174, 132)
+    detector = ZoomGalleryDetector()
+
+    tiles = detector.detect(image, source_key="zoom", roi=full_frame_roi(image))
+
+    assert len(tiles) == 1
+    assert tiles[0].debug_reason == "greenish-light-base-rectangle"
+    assert tiles[0].width <= MAX_PARTICIPANT_RECT_WIDTH
+    assert tiles[0].height <= MAX_PARTICIPANT_RECT_HEIGHT
+
+
+def test_detector_uses_probable_base_rectangle_when_no_visual_fallback_exists():
+    image = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    image[:, :] = (17, 20, 22)
+    detector = ZoomGalleryDetector()
+
+    tiles = detector.detect(image, source_key="zoom", roi=full_frame_roi(image))
+
+    assert len(tiles) == 1
+    assert tiles[0].debug_reason == "probable-base-rectangle"
+    assert tiles[0].width == MAX_PARTICIPANT_RECT_WIDTH
+    assert tiles[0].height == MAX_PARTICIPANT_RECT_HEIGHT
+
+
 def test_centered_name_fallback_stays_inside_max_participant_bound():
     image = np.zeros((1080, 1920, 3), dtype=np.uint8)
     image[:, :] = (17, 20, 22)

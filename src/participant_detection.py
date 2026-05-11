@@ -9,8 +9,10 @@ from models import ParticipantTile, Rect
 
 DEFAULT_TOP_MENU_HEIGHT = 53
 DEFAULT_BOTTOM_MENU_HEIGHT = 100
-MAX_PARTICIPANT_RECT_WIDTH = 944
-MAX_PARTICIPANT_RECT_HEIGHT = 534
+MAX_PARTICIPANT_RECT_WIDTH = 945
+MAX_PARTICIPANT_RECT_HEIGHT = 535
+PROBABLE_PARTICIPANT_RECT_WIDTH = 945
+PROBABLE_PARTICIPANT_RECT_HEIGHT = 535
 
 
 @dataclass
@@ -65,6 +67,8 @@ class ZoomGalleryDetector:
         candidates = self._dedupe(candidates)
         candidates = self._remove_containing_boxes(candidates)
         candidates = self._filter_inconsistent_tile_sizes(candidates)
+        if not candidates:
+            candidates = self._detect_initial_base_rectangle(image, gallery_roi)
         candidates.sort(key=lambda item: (item.rect[1], item.rect[0]))
 
         tiles: List[ParticipantTile] = []
@@ -374,6 +378,94 @@ class ZoomGalleryDetector:
 
         return self._dedupe(candidates)
 
+    def _detect_initial_base_rectangle(self, image: np.ndarray, roi: Rect) -> List[DetectionCandidate]:
+        color_candidates = self._detect_from_greenish_or_light_rectangles(image, roi)
+        if color_candidates:
+            return color_candidates
+
+        roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi)
+        if roi_width < PROBABLE_PARTICIPANT_RECT_WIDTH or roi_height < PROBABLE_PARTICIPANT_RECT_HEIGHT:
+            return []
+        width, height = self._clamp_participant_size(PROBABLE_PARTICIPANT_RECT_WIDTH, PROBABLE_PARTICIPANT_RECT_HEIGHT)
+        rect = self._rect_centered_in_roi(
+            roi_x + roi_width / 2.0,
+            roi_y + roi_height / 2.0,
+            min(width, roi_width),
+            min(height, roi_height),
+            (roi_x, roi_y, roi_width, roi_height),
+        )
+        if self._is_valid_rect(rect, image.shape[1], image.shape[0]):
+            return [DetectionCandidate(rect, 0.55, "probable-base-rectangle")]
+        return []
+
+    def _detect_from_greenish_or_light_rectangles(self, image: np.ndarray, roi: Rect) -> List[DetectionCandidate]:
+        roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi)
+        search_image = image[roi_y : roi_y + roi_height, roi_x : roi_x + roi_width]
+        if search_image.size == 0:
+            return []
+
+        source_height, source_width = search_image.shape[:2]
+        max_scan_width = 960
+        scan_scale = min(1.0, max_scan_width / float(max(1, source_width)))
+        if scan_scale < 1.0:
+            scan_width = max(1, int(round(source_width * scan_scale)))
+            scan_height = max(1, int(round(source_height * scan_scale)))
+            scan_image = cv2.resize(search_image, (scan_width, scan_height), interpolation=cv2.INTER_AREA)
+        else:
+            scan_image = search_image
+            scan_width = source_width
+            scan_height = source_height
+
+        b_channel, g_channel, r_channel = cv2.split(scan_image.astype(np.int16))
+        gray = cv2.cvtColor(scan_image, cv2.COLOR_BGR2GRAY)
+        greenish = (g_channel >= 54) & (g_channel >= r_channel + 10) & (g_channel >= b_channel + 6)
+        light_colored = gray >= 122
+        mask = (greenish | light_colored).astype(np.uint8) * 255
+
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (max(5, scan_width // 160), max(5, scan_height // 160)),
+        )
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        candidates: List[DetectionCandidate] = []
+        min_width = max(90, int(source_width * 0.08))
+        min_height = max(70, int(source_height * 0.08))
+
+        for contour in contours:
+            x, y, width, height = cv2.boundingRect(contour)
+            if scan_scale < 1.0:
+                x = int(round(x / scan_scale))
+                y = int(round(y / scan_scale))
+                width = int(round(width / scan_scale))
+                height = int(round(height / scan_scale))
+            if width < min_width or height < min_height:
+                continue
+
+            rect = (x + roi_x, y + roi_y, width, height)
+            rect = self._clamp_rect_to_participant_bounds(rect, (roi_x, roi_y, roi_width, roi_height))
+            if not self._is_valid_rect(rect, image.shape[1], image.shape[0]):
+                continue
+
+            local_x = max(0, rect[0] - roi_x)
+            local_y = max(0, rect[1] - roi_y)
+            local_width = min(source_width - local_x, rect[2])
+            local_height = min(source_height - local_y, rect[3])
+            region = mask[
+                int(local_y * scan_scale) : max(int((local_y + local_height) * scan_scale), int(local_y * scan_scale) + 1),
+                int(local_x * scan_scale) : max(int((local_x + local_width) * scan_scale), int(local_x * scan_scale) + 1),
+            ]
+            fill_ratio = float(np.count_nonzero(region)) / float(max(1, region.size))
+            if fill_ratio < 0.45:
+                continue
+            candidates.append(DetectionCandidate(rect, min(0.84, 0.62 + fill_ratio * 0.20), "greenish-light-base-rectangle"))
+
+        candidates = self._dedupe(candidates)
+        candidates = self._remove_containing_boxes(candidates)
+        return sorted(candidates, key=lambda item: (item.rect[1], item.rect[0]))
+
     def _find_centered_name_labels(self, image: np.ndarray, roi: Rect) -> List[Rect]:
         roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi)
         search_image = image[roi_y : roi_y + roi_height, roi_x : roi_x + roi_width]
@@ -479,6 +571,13 @@ class ZoomGalleryDetector:
         width = min(width, roi_x + roi_width - x)
         height = min(height, roi_y + roi_height - y)
         return x, y, max(1, int(width)), max(1, int(height))
+
+    def _clamp_rect_to_participant_bounds(self, rect: Rect, roi: Rect) -> Rect:
+        x, y, width, height = rect
+        width, height = self._clamp_participant_size(width, height)
+        center_x = x + rect[2] / 2.0
+        center_y = y + rect[3] / 2.0
+        return self._rect_centered_in_roi(center_x, center_y, width, height, roi)
 
     @staticmethod
     def _label_center_inside_candidates(label: Rect, candidates: List[DetectionCandidate]) -> bool:
