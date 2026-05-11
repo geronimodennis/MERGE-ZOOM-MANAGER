@@ -175,6 +175,44 @@ def test_detector_uses_gallery_rectangles_before_inner_fragments():
     assert abs(tiles[1].width - card_w) < 30
 
 
+def test_detector_excludes_zoom_top_and_bottom_menu_bars():
+    image = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    image[:, :] = (17, 20, 22)
+
+    top_menu_h = 92
+    bottom_menu_y = 958
+    image[:top_menu_h, :] = (17, 20, 22)
+    image[bottom_menu_y:, :] = (17, 20, 22)
+
+    cv2.putText(image, "Zoom Meeting", (28, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (235, 235, 235), 2)
+    cv2.putText(image, "View", (1810, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (235, 235, 235), 2)
+    for x in range(420, 1500, 170):
+        cv2.circle(image, (x, 1018), 18, (235, 235, 235), 2)
+        cv2.putText(image, "Menu", (x - 28, 1058), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (235, 235, 235), 1)
+
+    card_y = 220
+    card_h = 506
+    card_w = 900
+    first_x = 60
+    second_x = 960
+    image[card_y : card_y + card_h, first_x : first_x + card_w] = (34, 34, 34)
+    image[card_y : card_y + card_h, second_x : second_x + card_w] = (34, 34, 34)
+
+    cv2.ellipse(image, (first_x + 450, card_y + 360), (90, 125), 0, 0, 360, (104, 145, 188), -1)
+    cv2.circle(image, (second_x + 450, card_y + 350), 105, (72, 116, 172), -1)
+
+    roi = ZoomGalleryDetector._gallery_search_roi(image)
+    detector = ZoomGalleryDetector()
+
+    tiles = detector.detect(image, source_key="zoom")
+
+    assert roi[1] >= top_menu_h - 10
+    assert roi[1] + roi[3] <= bottom_menu_y + 10
+    assert len(tiles) == 2
+    assert all(tile.y >= top_menu_h - 10 for tile in tiles)
+    assert all(tile.y + tile.height <= bottom_menu_y + 10 for tile in tiles)
+
+
 def test_tracker_keeps_ids_when_gallery_layout_changes():
     detector = ZoomGalleryDetector()
     tracker = ParticipantTracker()

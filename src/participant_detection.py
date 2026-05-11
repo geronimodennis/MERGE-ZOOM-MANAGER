@@ -35,11 +35,12 @@ class ZoomGalleryDetector:
         if image is None or image.size == 0:
             return []
 
+        gallery_roi = self._gallery_search_roi(image)
         candidates = []
-        candidates.extend(self._detect_from_projection(image))
-        candidates.extend(self._detect_from_edges(image))
-        gallery_rect_candidates = self._detect_from_gallery_rectangles(image)
-        zoom_layout_candidates = self._detect_from_zoom_name_badges(image, candidates)
+        candidates.extend(self._detect_from_projection(image, gallery_roi))
+        candidates.extend(self._detect_from_edges(image, gallery_roi))
+        gallery_rect_candidates = self._detect_from_gallery_rectangles(image, gallery_roi)
+        zoom_layout_candidates = self._detect_from_zoom_name_badges(image, candidates, gallery_roi)
 
         if gallery_rect_candidates and len(gallery_rect_candidates) >= len(zoom_layout_candidates):
             candidates = gallery_rect_candidates
@@ -47,6 +48,7 @@ class ZoomGalleryDetector:
             candidates = zoom_layout_candidates
         else:
             candidates = self._consolidate_candidates(image, candidates)
+        candidates = [candidate for candidate in candidates if self._rect_inside_roi(candidate.rect, gallery_roi)]
         candidates = self._remove_containing_boxes(self._dedupe(candidates))
         candidates.sort(key=lambda item: (item.rect[1], item.rect[0]))
 
@@ -85,8 +87,13 @@ class ZoomGalleryDetector:
         hist = cv2.normalize(hist, hist).flatten().astype(np.float32)
         return np.concatenate([gray.flatten(), hist])
 
-    def _detect_from_projection(self, image: np.ndarray) -> List[DetectionCandidate]:
-        mask = self._foreground_mask(image)
+    def _detect_from_projection(self, image: np.ndarray, roi: Rect | None = None) -> List[DetectionCandidate]:
+        roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi)
+        search_image = image[roi_y : roi_y + roi_height, roi_x : roi_x + roi_width]
+        if search_image.size == 0:
+            return []
+
+        mask = self._foreground_mask(search_image)
         image_height, image_width = mask.shape[:2]
         x_segments = self._segments_from_projection(mask, axis=0)
         y_segments = self._segments_from_projection(mask, axis=1)
@@ -103,12 +110,18 @@ class ZoomGalleryDetector:
                 density = float(np.count_nonzero(mask[y1:y2, x1:x2])) / max(1, width * height)
                 if density < 0.04:
                     continue
-                candidates.append(DetectionCandidate(rect, min(0.99, 0.55 + density), "projection"))
+                absolute_rect = (x1 + roi_x, y1 + roi_y, width, height)
+                candidates.append(DetectionCandidate(absolute_rect, min(0.99, 0.55 + density), "projection"))
         return candidates
 
-    def _detect_from_edges(self, image: np.ndarray) -> List[DetectionCandidate]:
-        image_height, image_width = image.shape[:2]
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    def _detect_from_edges(self, image: np.ndarray, roi: Rect | None = None) -> List[DetectionCandidate]:
+        roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi)
+        search_image = image[roi_y : roi_y + roi_height, roi_x : roi_x + roi_width]
+        if search_image.size == 0:
+            return []
+
+        image_height, image_width = search_image.shape[:2]
+        gray = cv2.cvtColor(search_image, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
         edges = cv2.Canny(gray, 45, 140)
 
@@ -124,12 +137,13 @@ class ZoomGalleryDetector:
             if not self._is_valid_rect(rect, image_width, image_height):
                 continue
             area_ratio = (width * height) / float(image_width * image_height)
-            candidates.append(DetectionCandidate(rect, min(0.9, 0.45 + area_ratio), "edge"))
+            absolute_rect = (x + roi_x, y + roi_y, width, height)
+            candidates.append(DetectionCandidate(absolute_rect, min(0.9, 0.45 + area_ratio), "edge"))
         return candidates
 
-    def _detect_from_gallery_rectangles(self, image: np.ndarray) -> List[DetectionCandidate]:
+    def _detect_from_gallery_rectangles(self, image: np.ndarray, roi_rect: Rect | None = None) -> List[DetectionCandidate]:
         image_height, image_width = image.shape[:2]
-        roi_x, roi_y, roi_width, roi_height = self._gallery_search_roi(image)
+        roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi_rect)
         roi = image[roi_y : roi_y + roi_height, roi_x : roi_x + roi_width]
         if roi.size == 0:
             return []
@@ -245,7 +259,86 @@ class ZoomGalleryDetector:
             top = int(height * 0.07)
             bottom = int(height * 0.92)
 
+        activity_top, activity_bottom = ZoomGalleryDetector._chrome_activity_bounds(image)
+        top = max(top, activity_top)
+        bottom = min(bottom, activity_bottom)
+
+        if bottom - top < height * 0.35:
+            top = int(height * 0.07)
+            bottom = int(height * 0.92)
+
         return 0, top, width, max(1, bottom - top)
+
+    @staticmethod
+    def _chrome_activity_bounds(image: np.ndarray) -> Tuple[int, int]:
+        height = image.shape[0]
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        bright_pixels = gray > 145
+        row_activity = np.mean(bright_pixels, axis=1)
+
+        window = max(5, height // 180)
+        if window % 2 == 0:
+            window += 1
+        kernel = np.ones(window, dtype=np.float32) / float(window)
+        smooth = np.convolve(row_activity, kernel, mode="same")
+        threshold = max(0.003, min(0.035, float(np.percentile(smooth, 97)) * 0.35))
+
+        top_limit = min(int(height * 0.18), 190)
+        bottom_limit = max(0, height - min(int(height * 0.20), 230))
+        edge_zone = max(18, int(height * 0.035))
+        quiet_run = max(18, int(height * 0.025))
+        padding = max(6, int(height * 0.008))
+
+        top = 0
+        top_active = smooth[:top_limit] > threshold
+        if top_active.size and bool(np.any(top_active[:edge_zone])):
+            top = ZoomGalleryDetector._activity_boundary_from_top(top_active, quiet_run, padding)
+            top = max(top, min(top_limit, int(height * 0.085)))
+
+        bottom = height
+        bottom_active = smooth[bottom_limit:] > threshold
+        if bottom_active.size and bool(np.any(bottom_active[-edge_zone:])):
+            local_bottom = ZoomGalleryDetector._activity_boundary_from_bottom(bottom_active, quiet_run, padding)
+            bottom = bottom_limit + local_bottom
+            bottom = min(bottom, max(bottom_limit, height - int(height * 0.105)))
+
+        return min(top, top_limit), max(bottom, bottom_limit)
+
+    @staticmethod
+    def _activity_boundary_from_top(active_rows: np.ndarray, quiet_run: int, padding: int) -> int:
+        seen_active = False
+        last_active = 0
+        quiet_count = 0
+
+        for y, active in enumerate(active_rows):
+            if active:
+                seen_active = True
+                last_active = y
+                quiet_count = 0
+            elif seen_active:
+                quiet_count += 1
+                if quiet_count >= quiet_run:
+                    break
+
+        return last_active + padding if seen_active else 0
+
+    @staticmethod
+    def _activity_boundary_from_bottom(active_rows: np.ndarray, quiet_run: int, padding: int) -> int:
+        seen_active = False
+        first_active = len(active_rows)
+        quiet_count = 0
+
+        for y in range(len(active_rows) - 1, -1, -1):
+            if active_rows[y]:
+                seen_active = True
+                first_active = y
+                quiet_count = 0
+            elif seen_active:
+                quiet_count += 1
+                if quiet_count >= quiet_run:
+                    break
+
+        return max(0, first_active - padding) if seen_active else len(active_rows)
 
     def _consolidate_candidates(
         self,
@@ -267,19 +360,23 @@ class ZoomGalleryDetector:
         self,
         image: np.ndarray,
         content_candidates: List[DetectionCandidate],
+        roi: Rect | None = None,
     ) -> List[DetectionCandidate]:
-        badges = self._find_zoom_name_badges(image)
+        gallery_roi = self._normalize_roi(image, roi)
+        badges = self._find_zoom_name_badges(image, gallery_roi)
         if not badges:
             return []
 
         image_height, image_width = image.shape[:2]
+        roi_x, roi_y, roi_width, roi_height = gallery_roi
+        roi_bottom = roi_y + roi_height
         row_groups = self._group_badges_by_row(badges, max_gap=max(12, image_height // 45))
         candidates: List[DetectionCandidate] = []
 
         for row_badges in row_groups:
             row_badges.sort(key=lambda rect: rect[0])
             row_bottom = min(
-                image_height,
+                roi_bottom,
                 max(badge[1] + badge[3] for badge in row_badges) + max(3, image_height // 240),
             )
 
@@ -296,7 +393,7 @@ class ZoomGalleryDetector:
             else:
                 row_top = row_bottom - int(image_height * 0.45)
 
-            row_top = max(0, row_top)
+            row_top = max(roi_y, row_top)
             row_height = max(1, row_bottom - row_top)
             tile_width = max(inferred_width, int(round(row_height * 16.0 / 9.0)))
             if tile_width <= 0:
@@ -304,19 +401,24 @@ class ZoomGalleryDetector:
 
             for badge in row_badges:
                 badge_x, _badge_y, _badge_w, _badge_h = badge
-                tile_x = max(0, badge_x - max(2, image_width // 480))
-                if tile_x + tile_width > image_width:
-                    tile_x = max(0, image_width - tile_width)
-                rect = (int(tile_x), int(row_top), int(min(tile_width, image_width - tile_x)), int(row_height))
-                if self._is_valid_rect(rect, image_width, image_height):
+                tile_x = max(roi_x, badge_x - max(2, image_width // 480))
+                if tile_x + tile_width > roi_x + roi_width:
+                    tile_x = max(roi_x, roi_x + roi_width - tile_width)
+                rect = (int(tile_x), int(row_top), int(min(tile_width, roi_x + roi_width - tile_x)), int(row_height))
+                if self._is_valid_rect(rect, image_width, image_height) and self._rect_inside_roi(rect, gallery_roi):
                     candidates.append(DetectionCandidate(rect, 0.96, "zoom-name-badge-layout"))
 
         return self._dedupe(candidates)
 
-    def _find_zoom_name_badges(self, image: np.ndarray) -> List[Rect]:
-        image_height, image_width = image.shape[:2]
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        b_channel, g_channel, r_channel = cv2.split(image)
+    def _find_zoom_name_badges(self, image: np.ndarray, roi: Rect | None = None) -> List[Rect]:
+        roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi)
+        search_image = image[roi_y : roi_y + roi_height, roi_x : roi_x + roi_width]
+        if search_image.size == 0:
+            return []
+
+        image_height, image_width = search_image.shape[:2]
+        gray = cv2.cvtColor(search_image, cv2.COLOR_BGR2GRAY)
+        b_channel, g_channel, r_channel = cv2.split(search_image)
         bright_text = gray > 155
         red_muted_icon = (r_channel > 135) & (g_channel < 95) & (b_channel < 125)
         mask = (bright_text | red_muted_icon).astype(np.uint8) * 255
@@ -332,7 +434,7 @@ class ZoomGalleryDetector:
                 continue
             if not (12 <= height <= max(48, image_height * 0.055)):
                 continue
-            if y < image_height * 0.14 or y > image_height * 0.90:
+            if y < image_height * 0.02 or y > image_height * 0.98:
                 continue
 
             pad_x = max(4, image_width // 360)
@@ -345,7 +447,7 @@ class ZoomGalleryDetector:
             if badge_region.size == 0 or float(np.median(badge_region)) > 82:
                 continue
 
-            badges.append((x1, y1, x2 - x1, y2 - y1))
+            badges.append((x1 + roi_x, y1 + roi_y, x2 - x1, y2 - y1))
 
         return self._dedupe_badges(badges)
 
@@ -415,6 +517,30 @@ class ZoomGalleryDetector:
         if not tops:
             return None
         return int(min(tops))
+
+    @staticmethod
+    def _normalize_roi(image: np.ndarray, roi: Rect | None) -> Rect:
+        image_height, image_width = image.shape[:2]
+        if roi is None:
+            return 0, 0, image_width, image_height
+
+        x, y, width, height = roi
+        x = max(0, min(int(x), image_width - 1))
+        y = max(0, min(int(y), image_height - 1))
+        width = max(1, min(int(width), image_width - x))
+        height = max(1, min(int(height), image_height - y))
+        return x, y, width, height
+
+    @staticmethod
+    def _rect_inside_roi(rect: Rect, roi: Rect, tolerance: int = 2) -> bool:
+        x, y, width, height = rect
+        roi_x, roi_y, roi_width, roi_height = roi
+        return (
+            x >= roi_x - tolerance
+            and y >= roi_y - tolerance
+            and x + width <= roi_x + roi_width + tolerance
+            and y + height <= roi_y + roi_height + tolerance
+        )
 
     @staticmethod
     def _union_rect(rects: List[Rect]) -> Rect:
