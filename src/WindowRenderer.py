@@ -102,8 +102,8 @@ class WindowRenderer:
         self.window.menu.add_separator()
         self.window.menu.add_command(label="Toggle Live Detection Overlay", command=self.menu_ToggleLiveDebugOverlay)
         self.window.menu.add_command(label="Show Detection Debug Snapshot", command=self.menu_ShowDebugOverlay)
-        self.window.menu.add_command(label="Redraw Gallery ROI", command=self.menu_RedrawGalleryRoi)
-        self.window.menu.add_command(label="Reset Gallery ROI", command=self.menu_ResetGalleryRoi)
+        self.window.menu.add_command(label="Redraw Gallery ROI (Region of interest)", command=self.menu_RedrawGalleryRoi)
+        self.window.menu.add_command(label="Reset Gallery ROI (Region of interest)", command=self.menu_ResetGalleryRoi)
         self.window.menu.add_separator()
         self.window.menu.add_command(label="Clear Group Pins", command=self.menu_ClearGroupPreview)
 
