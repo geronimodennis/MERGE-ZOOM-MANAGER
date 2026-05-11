@@ -1,5 +1,7 @@
 import win32gui
 
+from win32_utils import is_desktop_or_shell_window
+
 titles = []
 
 
@@ -8,7 +10,7 @@ def winEnumHandler(hwnd, ctx):
     title = win32gui.GetWindowText(hwnd)
     if not title:
         return
-    if hwnd in (win32gui.GetDesktopWindow(), win32gui.GetShellWindow()):
+    if is_desktop_or_shell_window(hwnd):
         return
     if not win32gui.IsWindowVisible(hwnd):
         return

@@ -11,6 +11,7 @@ from win32api import GetSystemMetrics
 
 from image_utils import blank_image
 from performance import get_logger
+from win32_utils import get_desktop_window, get_shell_window
 
 
 logger = get_logger()
@@ -81,8 +82,8 @@ class WindowCapture:
         if not hwnd:
             return False
         try:
-            desktop_hwnd = win32gui.GetDesktopWindow()
-            shell_hwnd = win32gui.GetShellWindow()
+            desktop_hwnd = get_desktop_window()
+            shell_hwnd = get_shell_window()
             return bool(
                 hwnd not in (desktop_hwnd, shell_hwnd)
                 and win32gui.IsWindow(hwnd)

@@ -17,6 +17,7 @@ setup(
         "participant_detection",
         "participant_tracking",
         "performance",
+        "win32_utils",
         "win32Manager",
         "windowCaptureHandler",
     ],
