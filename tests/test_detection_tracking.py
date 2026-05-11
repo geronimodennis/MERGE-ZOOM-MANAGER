@@ -344,6 +344,22 @@ def test_centered_name_fallback_stays_inside_max_participant_bound():
     assert tiles[0].height <= MAX_PARTICIPANT_RECT_HEIGHT
 
 
+def test_centered_name_fallback_ignores_partial_edge_box_near_label_edge():
+    image = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    image[:, :] = (17, 20, 22)
+    roi = (0, 53, 1920, 855)
+    put_centered_text(image, "Dennis", (960, 480))
+    partial_edge = DetectionCandidate((210, 160, 780, 409), 0.64, "edge")
+    detector = ZoomGalleryDetector()
+
+    candidates = detector._detect_from_centered_names(image, roi, [partial_edge])
+
+    assert len(candidates) == 1
+    assert candidates[0].reason == "center-name-layout"
+    assert candidates[0].rect[2] >= 900
+    assert candidates[0].rect[3] >= 500
+
+
 def test_tracker_keeps_ids_when_gallery_layout_changes():
     detector = ZoomGalleryDetector()
     tracker = ParticipantTracker()

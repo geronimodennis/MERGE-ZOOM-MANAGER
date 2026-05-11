@@ -13,6 +13,14 @@ MAX_PARTICIPANT_RECT_WIDTH = 945
 MAX_PARTICIPANT_RECT_HEIGHT = 535
 PROBABLE_PARTICIPANT_RECT_WIDTH = 945
 PROBABLE_PARTICIPANT_RECT_HEIGHT = 535
+STABLE_TILE_REASONS = {
+    "gallery-rectangle",
+    "gallery-rectangle-split",
+    "zoom-name-badge-layout",
+    "center-name-layout",
+    "greenish-light-base-rectangle",
+    "probable-base-rectangle",
+}
 
 
 @dataclass
@@ -372,7 +380,7 @@ class ZoomGalleryDetector:
                 rect = self._rect_centered_in_roi(label_center_x, label_center_y, tile_width, tile_height, (roi_x, roi_y, roi_width, roi_height))
                 if not self._is_valid_rect(rect, image_width, image_height):
                     continue
-                if any(self._iou(rect, candidate.rect) > 0.45 for candidate in existing_candidates):
+                if any(candidate.reason in STABLE_TILE_REASONS and self._iou(rect, candidate.rect) > 0.45 for candidate in existing_candidates):
                     continue
                 candidates.append(DetectionCandidate(rect, 0.74, "center-name-layout"))
 
@@ -481,11 +489,12 @@ class ZoomGalleryDetector:
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         labels: List[Rect] = []
+        min_centered_text_height = max(14, int(round(image_height * 0.022)))
         for contour in contours:
             x, y, width, height = cv2.boundingRect(contour)
             if not (35 <= width <= image_width * 0.40):
                 continue
-            if not (12 <= height <= max(80, image_height * 0.12)):
+            if not (min_centered_text_height <= height <= max(80, image_height * 0.12)):
                 continue
             if y < image_height * 0.04 or y + height > image_height * 0.96:
                 continue
@@ -496,9 +505,20 @@ class ZoomGalleryDetector:
         return self._dedupe_badges(labels)
 
     def _probable_tile_size_from_candidates(self, candidates: List[DetectionCandidate]) -> Tuple[int, int] | None:
-        cardish = [candidate.rect for candidate in candidates if self._is_cardish_aspect(candidate.rect)]
-        if not cardish:
+        stable_cardish = [
+            candidate.rect
+            for candidate in candidates
+            if candidate.reason in STABLE_TILE_REASONS and self._is_cardish_aspect(candidate.rect)
+        ]
+        if stable_cardish:
+            widths = np.array([rect[2] for rect in stable_cardish], dtype=np.float32)
+            heights = np.array([rect[3] for rect in stable_cardish], dtype=np.float32)
+            return int(round(float(np.median(widths)))), int(round(float(np.median(heights))))
+
+        cardish_candidates = [candidate for candidate in candidates if self._is_cardish_aspect(candidate.rect)]
+        if len(cardish_candidates) < 2 or not self._candidates_look_like_tiles(cardish_candidates):
             return None
+        cardish = [candidate.rect for candidate in cardish_candidates]
         widths = np.array([rect[2] for rect in cardish], dtype=np.float32)
         heights = np.array([rect[3] for rect in cardish], dtype=np.float32)
         return int(round(float(np.median(widths)))), int(round(float(np.median(heights))))
@@ -579,15 +599,40 @@ class ZoomGalleryDetector:
         center_y = y + rect[3] / 2.0
         return self._rect_centered_in_roi(center_x, center_y, width, height, roi)
 
-    @staticmethod
-    def _label_center_inside_candidates(label: Rect, candidates: List[DetectionCandidate]) -> bool:
+    def _label_center_inside_candidates(self, label: Rect, candidates: List[DetectionCandidate]) -> bool:
+        return any(self._candidate_covers_centered_label(label, candidate) for candidate in candidates)
+
+    def _candidate_covers_centered_label(self, label: Rect, candidate: DetectionCandidate) -> bool:
         center_x = label[0] + label[2] / 2.0
         center_y = label[1] + label[3] / 2.0
-        for candidate in candidates:
-            x, y, width, height = candidate.rect
-            if x <= center_x <= x + width and y <= center_y <= y + height:
-                return True
-        return False
+        x, y, width, height = candidate.rect
+        if not (x <= center_x <= x + width and y <= center_y <= y + height):
+            return False
+        if not self._is_cardish_aspect(candidate.rect):
+            return False
+        if candidate.reason in STABLE_TILE_REASONS:
+            return True
+
+        candidate_center_x = x + width / 2.0
+        candidate_center_y = y + height / 2.0
+        horizontal_offset = abs(center_x - candidate_center_x) / float(max(1, width))
+        vertical_offset = abs(center_y - candidate_center_y) / float(max(1, height))
+
+        left_margin = center_x - x
+        right_margin = x + width - center_x
+        top_margin = center_y - y
+        bottom_margin = y + height - center_y
+        min_horizontal_margin = max(18.0, label[2] * 0.55, width * 0.12)
+        min_vertical_margin = max(18.0, label[3] * 1.4, height * 0.18)
+
+        return (
+            horizontal_offset <= 0.28
+            and vertical_offset <= 0.30
+            and left_margin >= min_horizontal_margin
+            and right_margin >= min_horizontal_margin
+            and top_margin >= min_vertical_margin
+            and bottom_margin >= min_vertical_margin
+        )
 
     def _find_zoom_name_badges(self, image: np.ndarray, roi: Rect | None = None) -> List[Rect]:
         roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi)
