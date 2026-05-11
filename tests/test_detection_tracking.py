@@ -189,6 +189,56 @@ def test_detector_uses_zoom_name_badges_to_infer_full_cards():
     assert tiles[1].height <= MAX_PARTICIPANT_RECT_HEIGHT
 
 
+def test_detector_uses_name_badges_for_gray_open_camera_tiles_without_edges():
+    image = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    image[:, :] = (94, 94, 94)
+
+    card_y = 260
+    card_h = 315
+    card_w = 560
+    card_xs = [80, 680, 1280]
+    for index, card_x in enumerate(card_xs):
+        image[card_y : card_y + card_h, card_x : card_x + card_w] = (94, 94, 94)
+        cv2.ellipse(
+            image,
+            (card_x + card_w // 2, card_y + 150),
+            (74, 104),
+            0,
+            0,
+            360,
+            (102, 102, 102),
+            -1,
+        )
+
+        badge_x = card_x + 8
+        badge_y = card_y + card_h - 30
+        cv2.rectangle(image, (badge_x, badge_y), (badge_x + 132, badge_y + 28), (35, 35, 35), -1)
+        cv2.circle(image, (badge_x + 13, badge_y + 14), 8, (45, 45, 235), -1)
+        cv2.putText(
+            image,
+            f"Person {index + 1}",
+            (badge_x + 30, badge_y + 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            (245, 245, 245),
+            2,
+        )
+
+    detector = ZoomGalleryDetector()
+
+    tiles = detector.detect(image, source_key="zoom", roi=full_frame_roi(image))
+
+    assert len(tiles) == 3
+    assert [tile.debug_reason for tile in tiles] == [
+        "zoom-name-badge-layout",
+        "zoom-name-badge-layout",
+        "zoom-name-badge-layout",
+    ]
+    assert all(tile.width <= MAX_PARTICIPANT_RECT_WIDTH for tile in tiles)
+    assert all(tile.height <= MAX_PARTICIPANT_RECT_HEIGHT for tile in tiles)
+    assert [tile.x for tile in tiles] == sorted(tile.x for tile in tiles)
+
+
 def test_detector_uses_gallery_rectangles_before_inner_fragments():
     image = np.zeros((1080, 1920, 3), dtype=np.uint8)
     image[:, :] = (17, 20, 22)

@@ -300,11 +300,10 @@ class ZoomGalleryDetector:
         content_candidates: List[DetectionCandidate],
         roi: Rect | None = None,
     ) -> List[DetectionCandidate]:
-        if not content_candidates:
-            return []
-
         gallery_roi = self._normalize_roi(image, roi)
         badges = self._find_zoom_name_badges(image, gallery_roi)
+        if not content_candidates:
+            badges = self._compact_zoom_badges_for_layout_only(badges, gallery_roi)
         if not badges:
             return []
 
@@ -350,6 +349,12 @@ class ZoomGalleryDetector:
                     candidates.append(DetectionCandidate(rect, 0.96, "zoom-name-badge-layout"))
 
         return self._dedupe(candidates)
+
+    @staticmethod
+    def _compact_zoom_badges_for_layout_only(badges: List[Rect], roi: Rect) -> List[Rect]:
+        _roi_x, _roi_y, _roi_width, roi_height = roi
+        max_badge_height = max(30, min(32, int(round(roi_height * 0.030))))
+        return [badge for badge in badges if badge[3] <= max_badge_height]
 
     def _detect_from_centered_names(
         self,
