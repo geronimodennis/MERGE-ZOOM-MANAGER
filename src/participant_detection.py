@@ -21,6 +21,7 @@ STABLE_TILE_REASONS = {
     "greenish-light-base-rectangle",
     "probable-base-rectangle",
 }
+UNSTABLE_TILE_REASONS = {"edge", "projection", "fragment-union"}
 
 
 @dataclass
@@ -73,6 +74,7 @@ class ZoomGalleryDetector:
         candidates.extend(self._detect_from_centered_names(image, gallery_roi, candidates))
         candidates = [candidate for candidate in candidates if self._rect_inside_roi(candidate.rect, gallery_roi)]
         candidates = self._dedupe(candidates)
+        candidates = self._remove_overlapping_unstable_boxes(candidates)
         candidates = self._remove_containing_boxes(candidates)
         candidates = self._filter_inconsistent_tile_sizes(candidates)
         if not candidates:
@@ -957,6 +959,32 @@ class ZoomGalleryDetector:
 
         return [candidate for index, candidate in enumerate(candidates) if index not in remove_indexes]
 
+    def _remove_overlapping_unstable_boxes(self, candidates: List[DetectionCandidate]) -> List[DetectionCandidate]:
+        if len(candidates) <= 1:
+            return candidates
+
+        remove_indexes = set()
+        for index, candidate in enumerate(candidates):
+            if candidate.reason not in UNSTABLE_TILE_REASONS:
+                continue
+
+            candidate_area = self._rect_area(candidate.rect)
+            if candidate_area <= 0:
+                remove_indexes.add(index)
+                continue
+
+            for other_index, other in enumerate(candidates):
+                if other_index == index or other.reason not in STABLE_TILE_REASONS:
+                    continue
+
+                smaller_area = min(candidate_area, self._rect_area(other.rect))
+                overlap_ratio = self._intersection_area(candidate.rect, other.rect) / float(max(1, smaller_area))
+                if overlap_ratio >= 0.28:
+                    remove_indexes.add(index)
+                    break
+
+        return [candidate for index, candidate in enumerate(candidates) if index not in remove_indexes]
+
     def _filter_inconsistent_tile_sizes(self, candidates: List[DetectionCandidate]) -> List[DetectionCandidate]:
         if len(candidates) <= 1:
             return candidates
@@ -1008,13 +1036,19 @@ class ZoomGalleryDetector:
         return ox <= ix and oy <= iy and ox + ow >= ix + iw and oy + oh >= iy + ih
 
     @staticmethod
-    def _iou(a: Rect, b: Rect) -> float:
+    def _intersection_area(a: Rect, b: Rect) -> int:
         ax, ay, aw, ah = a
         bx, by, bw, bh = b
         x1 = max(ax, bx)
         y1 = max(ay, by)
         x2 = min(ax + aw, bx + bw)
         y2 = min(ay + ah, by + bh)
-        intersection = max(0, x2 - x1) * max(0, y2 - y1)
+        return max(0, x2 - x1) * max(0, y2 - y1)
+
+    @staticmethod
+    def _iou(a: Rect, b: Rect) -> float:
+        intersection = ZoomGalleryDetector._intersection_area(a, b)
+        aw, ah = a[2], a[3]
+        bw, bh = b[2], b[3]
         union = aw * ah + bw * bh - intersection
         return intersection / float(union) if union else 0.0
