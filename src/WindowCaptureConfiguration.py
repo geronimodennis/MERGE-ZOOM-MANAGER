@@ -41,6 +41,7 @@ class WindowCaptureConfiguration:
             "optionMenuCallback": None,
             "previewCanvas": preview_canvas,
             "captureHandler": None,
+            "manualRoi": None,
         }
 
     def _create_search(self):

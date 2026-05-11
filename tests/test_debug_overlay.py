@@ -77,6 +77,34 @@ class FakeDebugProcessor:
         return frame, [{"tile_id": 4, "index": 0, "source_key": "fake", "rect": (0, 0, 32, 18)}]
 
 
+class FakeCaptureHandler:
+    hwnd = 0
+
+    def __init__(self, image):
+        self.image = image
+
+    def get_screenshot(self):
+        return self.image.copy()
+
+
+def test_capture_processor_applies_manual_roi_to_detection_and_overlay():
+    image = np.zeros((360, 480, 3), dtype=np.uint8)
+    image[:, :] = (17, 20, 22)
+    image[280:350, 80:204] = (70, 120, 180)
+    config = {"winName": "zoom", "captureHandler": FakeCaptureHandler(image), "manualRoi": None}
+    processor = CaptureProcessor([config], chromaKey=(0, 177, 64))
+
+    assert processor.process_tiles() == []
+    assert processor.set_manual_roi("zoom", (0, 0, 480, 360))
+
+    tiles = processor.process_tiles()
+    overlay, _cells = processor.build_live_debug_overlay()
+
+    assert len(tiles) == 1
+    assert processor.last_rois["zoom"] == (0, 0, 480, 360)
+    assert overlay is not None
+
+
 def test_runner_publishes_fresh_debug_frames_when_enabled():
     runner = CaptureRunnerOnThread([], (0, 177, 64))
     runner.capPorcessor = FakeDebugProcessor()

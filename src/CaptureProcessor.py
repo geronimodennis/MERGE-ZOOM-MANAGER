@@ -3,6 +3,7 @@ from threading import Lock
 import numpy as np
 
 from image_utils import blank_image, draw_debug_overlay
+from models import Rect
 from participant_detection import ZoomGalleryDetector
 from participant_tracking import ParticipantTracker
 
@@ -15,6 +16,7 @@ class CaptureProcessor:
         self.tracker = ParticipantTracker()
         self.last_tiles = []
         self.last_screenshots = {}
+        self.last_rois = {}
         self.frame_index = 0
         self._lock = Lock()
 
@@ -25,6 +27,7 @@ class CaptureProcessor:
     def process_tiles(self):
         detections = []
         screenshots = {}
+        rois = {}
         self.frame_index += 1
 
         for config in self._captureConfigurationList:
@@ -38,11 +41,14 @@ class CaptureProcessor:
                 continue
 
             screenshots[source_key] = screenshot
-            tiles = self.detector.detect(screenshot, source_key=source_key, frame_index=self.frame_index)
+            roi = self._roi_for_config(config, screenshot)
+            rois[source_key] = roi
+            tiles = self.detector.detect(screenshot, source_key=source_key, frame_index=self.frame_index, roi=roi)
             detections.extend(tiles)
 
         with self._lock:
             self.last_screenshots = screenshots
+            self.last_rois = rois
             tracked = self.tracker.update(detections)
             self.last_tiles = tracked
         return tracked
@@ -74,13 +80,14 @@ class CaptureProcessor:
                 return None
             image = image.copy()
             tiles = [tile for tile in self.last_tiles if tile.source_key == source_key]
-            roi = self.detector._gallery_search_roi(image)
+            roi = self.last_rois.get(source_key) or self.detector._gallery_search_roi(image)
         return draw_debug_overlay(image, tiles, title=f"source {source_key}", roi=roi)
 
     def build_live_debug_overlay(self):
         with self._lock:
             screenshots = [(source_key, image.copy()) for source_key, image in self.last_screenshots.items()]
             tiles = list(self.last_tiles)
+            rois = dict(self.last_rois)
 
         if not screenshots:
             return None, []
@@ -89,7 +96,7 @@ class CaptureProcessor:
         cells = []
         for source_key, image in screenshots:
             source_tiles = [tile for tile in tiles if tile.source_key == source_key]
-            roi = self.detector._gallery_search_roi(image)
+            roi = rois.get(source_key) or self.detector._gallery_search_roi(image)
             overlay = draw_debug_overlay(
                 image,
                 source_tiles,
@@ -113,6 +120,47 @@ class CaptureProcessor:
                 )
         return frame, cells
 
+    def get_source_snapshot(self, preferred_source_key=None):
+        with self._lock:
+            if not self.last_screenshots:
+                return None
+            source_key = preferred_source_key if preferred_source_key in self.last_screenshots else next(iter(self.last_screenshots.keys()))
+            image = self.last_screenshots[source_key].copy()
+            roi = self.last_rois.get(source_key) or self.detector._gallery_search_roi(image)
+            config = self._config_for_source_key(source_key)
+            manual = bool(config.get("manualRoi")) if config else False
+        return {"source_key": source_key, "image": image, "roi": roi, "manual": manual}
+
+    def set_manual_roi(self, source_key: str, roi: Rect):
+        with self._lock:
+            config = self._config_for_source_key(source_key)
+            if config is None and len(self._captureConfigurationList) == 1:
+                config = self._captureConfigurationList[0]
+                source_key = self._source_key(config)
+            if config is None:
+                return False
+
+            image = self.last_screenshots.get(source_key)
+            normalized_roi = self.detector._normalize_roi(image, roi) if image is not None else tuple(int(value) for value in roi)
+            config["manualRoi"] = normalized_roi
+            self.last_rois[source_key] = normalized_roi
+        return True
+
+    def clear_manual_roi(self, source_key: str | None = None):
+        with self._lock:
+            changed = False
+            for config in self._captureConfigurationList:
+                config_source_key = self._source_key(config)
+                if source_key is not None and config_source_key != source_key:
+                    continue
+                if config.get("manualRoi") is not None:
+                    changed = True
+                config["manualRoi"] = None
+                image = self.last_screenshots.get(config_source_key)
+                if image is not None:
+                    self.last_rois[config_source_key] = self.detector._gallery_search_roi(image)
+        return changed
+
     def _stack_debug_overlays(self, overlays):
         if len(overlays) == 1:
             return overlays[0], [(0, 0)]
@@ -131,6 +179,18 @@ class CaptureProcessor:
 
     def setChromaKey(self, chromaKey):
         self._chromaKey = chromaKey or (0, 177, 64)
+
+    def _roi_for_config(self, config: dict, image: np.ndarray) -> Rect:
+        manual_roi = config.get("manualRoi")
+        if manual_roi is not None:
+            return self.detector._normalize_roi(image, manual_roi)
+        return self.detector._gallery_search_roi(image)
+
+    def _config_for_source_key(self, source_key: str):
+        for config in self._captureConfigurationList:
+            if self._source_key(config) == source_key:
+                return config
+        return None
 
     @staticmethod
     def _source_key(config: dict) -> str:

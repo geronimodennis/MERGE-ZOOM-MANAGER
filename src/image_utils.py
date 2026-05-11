@@ -89,6 +89,12 @@ def _tile_id(tile_or_image):
     return None
 
 
+def _tile_source_key(tile_or_image):
+    if isinstance(tile_or_image, ParticipantTile):
+        return tile_or_image.source_key
+    return None
+
+
 def stack_tiles(
     tiles: Sequence,
     background: RGBColor = (0, 177, 64),
@@ -125,6 +131,7 @@ def stack_tiles(
         cells.append(
             {
                 "tile_id": _tile_id(tile),
+                "source_key": _tile_source_key(tile),
                 "index": index,
                 "rect": (x, y, tile_width, tile_height),
             }
@@ -151,7 +158,7 @@ def draw_debug_overlay(
     if roi is not None:
         roi_x, roi_y, roi_width, roi_height = roi
         cv2.rectangle(overlay, (roi_x, roi_y), (roi_x + roi_width, roi_y + roi_height), (255, 170, 40), 2)
-        roi_label = f"gallery roi y={roi_y} h={roi_height}"
+        roi_label = f"gallery roi x={roi_x} y={roi_y} w={roi_width} h={roi_height}"
         cv2.putText(
             overlay,
             roi_label,

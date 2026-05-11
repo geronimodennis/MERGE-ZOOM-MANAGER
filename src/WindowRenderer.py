@@ -3,6 +3,7 @@ from tkinter import messagebox
 
 import cv2
 
+from RoiEditorWindow import RoiEditorWindow
 from WindowRendererGroupPreview import WindowRendererGroupPreview
 from WindowRendererPreview import WindowRendererPreview
 from captureRunnerOnThread import CaptureRunnerOnThread
@@ -24,10 +25,12 @@ class WindowRenderer:
         self.isRendering = False
         self.currentImage = None
         self.currentTileId = None
+        self.currentSourceKey = None
         self.currentCells = []
         self.currentSourceSize = (0, 0)
         self.displayRect = (0, 0, 1, 1)
         self.showDebugOverlay = False
+        self.roiEditorWindow = None
         self.initializeObject(parent, background, captureConfiguration)
 
     def initializeObject(self, parent, background, captureConfiguration):
@@ -76,6 +79,8 @@ class WindowRenderer:
             self.renderPreviewWindow.close()
         if self.renderGroupPreviewWindow is not None:
             self.renderGroupPreviewWindow.close()
+        if self.roiEditorWindow is not None:
+            self.roiEditorWindow.close()
         self.window.destroy()
         self.isRendering = False
 
@@ -89,6 +94,8 @@ class WindowRenderer:
         self.window.menu.add_separator()
         self.window.menu.add_command(label="Toggle Live Detection Overlay", command=self.menu_ToggleLiveDebugOverlay)
         self.window.menu.add_command(label="Show Detection Debug Snapshot", command=self.menu_ShowDebugOverlay)
+        self.window.menu.add_command(label="Redraw Gallery ROI", command=self.menu_RedrawGalleryRoi)
+        self.window.menu.add_command(label="Reset Gallery ROI", command=self.menu_ResetGalleryRoi)
         self.window.menu.add_separator()
         self.window.menu.add_command(label="Clear Group Pins", command=self.menu_ClearGroupPreview)
 
@@ -150,9 +157,11 @@ class WindowRenderer:
         display_x, display_y, display_width, display_height = self.displayRect
         if display_width <= 0 or display_height <= 0:
             self.currentTileId = None
+            self.currentSourceKey = None
             return None
         if x < display_x or y < display_y or x >= display_x + display_width or y >= display_y + display_height:
             self.currentTileId = None
+            self.currentSourceKey = None
             return None
 
         source_width, source_height = self.currentSourceSize
@@ -160,6 +169,7 @@ class WindowRenderer:
         source_y = (y - display_y) * source_height / float(display_height)
         cell = find_cell_at(self.currentCells, source_x, source_y)
         self.currentTileId = None if cell is None else cell.get("tile_id")
+        self.currentSourceKey = None if cell is None else cell.get("source_key")
         return self.currentTileId
 
     def windowClick(self, event):
@@ -240,3 +250,34 @@ class WindowRenderer:
             messagebox.showinfo(title="Detection debug", message="No detection overlay is available yet.")
             return
         cv2.imshow("detection debug overlay", overlay)
+
+    def menu_RedrawGalleryRoi(self):
+        snapshot = self.captureRunnerOnThread.get_roi_edit_snapshot(self.currentSourceKey)
+        if snapshot is None:
+            messagebox.showinfo(title="Gallery ROI", message="No Zoom capture frame is available yet.")
+            return
+
+        source_key = snapshot["source_key"]
+
+        def _save_roi(roi):
+            if self.captureRunnerOnThread.set_manual_roi(source_key, roi):
+                self.showDebugOverlay = True
+                self.captureRunnerOnThread.set_live_debug_overlay_enabled(True)
+
+        def _reset_roi():
+            self.captureRunnerOnThread.clear_manual_roi(source_key)
+
+        self.roiEditorWindow = RoiEditorWindow(
+            self.window,
+            f"Gallery ROI - {source_key}",
+            snapshot["image"],
+            snapshot["roi"],
+            self.background,
+            _save_roi,
+            _reset_roi,
+        )
+
+    def menu_ResetGalleryRoi(self):
+        snapshot = self.captureRunnerOnThread.get_roi_edit_snapshot(self.currentSourceKey)
+        source_key = None if snapshot is None else snapshot["source_key"]
+        self.captureRunnerOnThread.clear_manual_roi(source_key)

@@ -244,6 +244,15 @@ class CaptureRunnerOnThread:
                 return self._debug_frame.copy(), list(self._debug_cells)
         return self._refresh_debug_overlay()
 
+    def get_roi_edit_snapshot(self, preferred_source_key=None):
+        return self.capPorcessor.get_source_snapshot(preferred_source_key)
+
+    def set_manual_roi(self, source_key, roi):
+        return self.capPorcessor.set_manual_roi(source_key, roi)
+
+    def clear_manual_roi(self, source_key=None):
+        return self.capPorcessor.clear_manual_roi(source_key)
+
     def set_live_debug_overlay_enabled(self, enabled: bool):
         with self._lock:
             self._debug_overlay_enabled = bool(enabled)

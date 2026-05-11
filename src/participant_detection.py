@@ -7,6 +7,10 @@ import numpy as np
 from models import ParticipantTile, Rect
 
 
+DEFAULT_TOP_MENU_HEIGHT = 53
+DEFAULT_BOTTOM_MENU_HEIGHT = 100
+
+
 @dataclass
 class DetectionCandidate:
     rect: Rect
@@ -31,11 +35,17 @@ class ZoomGalleryDetector:
         self.max_aspect_ratio = max_aspect_ratio
         self.background_tolerance = background_tolerance
 
-    def detect(self, image: np.ndarray, source_key: str = "", frame_index: int = 0) -> List[ParticipantTile]:
+    def detect(
+        self,
+        image: np.ndarray,
+        source_key: str = "",
+        frame_index: int = 0,
+        roi: Rect | None = None,
+    ) -> List[ParticipantTile]:
         if image is None or image.size == 0:
             return []
 
-        gallery_roi = self._gallery_search_roi(image)
+        gallery_roi = self._normalize_roi(image, roi) if roi is not None else self._gallery_search_roi(image)
         candidates = []
         candidates.extend(self._detect_from_projection(image, gallery_roi))
         candidates.extend(self._detect_from_edges(image, gallery_roi))
@@ -233,165 +243,15 @@ class ZoomGalleryDetector:
         return np.median(samples, axis=0)
 
     @staticmethod
-    def _gallery_search_roi(image: np.ndarray) -> Rect:
+    def _gallery_search_roi(
+        image: np.ndarray,
+        top_menu_height: int = DEFAULT_TOP_MENU_HEIGHT,
+        bottom_menu_height: int = DEFAULT_BOTTOM_MENU_HEIGHT,
+    ) -> Rect:
         height, width = image.shape[:2]
-        chrome_top, chrome_bottom = ZoomGalleryDetector._chrome_activity_bounds(image)
-        surface_bounds = ZoomGalleryDetector._gallery_surface_bounds(image, chrome_top, chrome_bottom)
-
-        if surface_bounds is not None:
-            surface_top, surface_bottom = surface_bounds
-            surface_padding = max(8, min(18, int(height * 0.018)))
-            top = max(chrome_top, surface_top - surface_padding)
-            bottom = min(chrome_bottom, surface_bottom + surface_padding)
-        else:
-            top = chrome_top
-            bottom = chrome_bottom
-
-        if bottom - top < height * 0.30:
-            top = chrome_top
-            bottom = chrome_bottom
-        if bottom - top < height * 0.30:
-            top = int(height * 0.07)
-            bottom = int(height * 0.92)
-
-        top = max(0, min(top, height - 1))
-        bottom = max(top + 1, min(bottom, height))
+        top = max(0, min(int(top_menu_height), max(0, height - 1)))
+        bottom = max(top + 1, min(height, height - max(0, int(bottom_menu_height))))
         return 0, top, width, bottom - top
-
-    @staticmethod
-    def _chrome_activity_bounds(image: np.ndarray) -> Tuple[int, int]:
-        height = image.shape[0]
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        bright_pixels = gray > 145
-        edges = cv2.Canny(gray, 45, 135) > 0
-        row_activity = np.mean(bright_pixels, axis=1) + np.mean(edges, axis=1) * 0.35
-
-        window = max(5, height // 180)
-        if window % 2 == 0:
-            window += 1
-        kernel = np.ones(window, dtype=np.float32) / float(window)
-        smooth = np.convolve(row_activity, kernel, mode="same")
-        threshold = max(0.003, min(0.035, float(np.percentile(smooth, 97)) * 0.35))
-
-        top_limit = min(int(height * 0.28), 320)
-        bottom_limit = max(0, height - min(int(height * 0.28), 340))
-        edge_zone = max(18, int(height * 0.035))
-        quiet_run = max(18, int(height * 0.025))
-        padding = max(6, int(height * 0.008))
-
-        top = 0
-        top_active = smooth[:top_limit] > threshold
-        if top_active.size and bool(np.any(top_active[:edge_zone])):
-            top = ZoomGalleryDetector._activity_boundary_from_top(top_active, quiet_run, padding)
-
-        bottom = height
-        bottom_active = smooth[bottom_limit:] > threshold
-        bottom_boundary = ZoomGalleryDetector._bottom_chrome_boundary(bottom_active, edge_zone, quiet_run, padding)
-        if bottom_boundary is not None:
-            bottom = bottom_limit + bottom_boundary
-
-        return min(top, top_limit), max(bottom, bottom_limit)
-
-    @staticmethod
-    def _bottom_chrome_boundary(
-        active_rows: np.ndarray,
-        edge_zone: int,
-        quiet_run: int,
-        padding: int,
-    ) -> int | None:
-        if not active_rows.size or not bool(np.any(active_rows)):
-            return None
-
-        if bool(np.any(active_rows[-edge_zone:])):
-            return ZoomGalleryDetector._activity_boundary_from_bottom(active_rows, quiet_run, padding)
-
-        # Zoom's toolbar controls can sit above a quiet bottom strip, so do not
-        # require activity in the final rows before treating it as bottom chrome.
-        boundary = ZoomGalleryDetector._activity_boundary_from_bottom(active_rows, quiet_run, padding)
-        if boundary <= max(edge_zone, quiet_run):
-            return None
-        return boundary
-
-    @staticmethod
-    def _gallery_surface_bounds(image: np.ndarray, chrome_top: int, chrome_bottom: int) -> Tuple[int, int] | None:
-        image_height, image_width = image.shape[:2]
-        search_top = max(0, min(chrome_top, image_height - 1))
-        search_bottom = max(search_top + 1, min(chrome_bottom, image_height))
-        search_image = image[search_top:search_bottom, :]
-        if search_image.size == 0:
-            return None
-
-        background = ZoomGalleryDetector._estimate_border_color(search_image)
-        diff = np.max(np.abs(search_image.astype(np.int16) - background.astype(np.int16)), axis=2)
-        mask = (diff > 3).astype(np.uint8) * 255
-
-        kernel_width = max(11, image_width // 140)
-        kernel_height = max(7, image_height // 150)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_width, kernel_height))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        surfaces: List[Rect] = []
-        min_width = max(140, int(image_width * 0.16))
-        min_height = max(90, int(image_height * 0.10))
-        min_area = image_width * image_height * 0.012
-
-        for contour in contours:
-            x, y, width, height = cv2.boundingRect(contour)
-            area = width * height
-            if width < min_width or height < min_height or area < min_area:
-                continue
-            fill_ratio = cv2.contourArea(contour) / float(max(1, area))
-            if fill_ratio < 0.22:
-                continue
-            aspect = width / float(max(1, height))
-            if not (1.0 <= aspect <= 8.0):
-                continue
-            surfaces.append((x, y + search_top, width, height))
-
-        if not surfaces:
-            return None
-
-        top = min(rect[1] for rect in surfaces)
-        bottom = max(rect[1] + rect[3] for rect in surfaces)
-        return top, bottom
-
-    @staticmethod
-    def _activity_boundary_from_top(active_rows: np.ndarray, quiet_run: int, padding: int) -> int:
-        seen_active = False
-        last_active = 0
-        quiet_count = 0
-
-        for y, active in enumerate(active_rows):
-            if active:
-                seen_active = True
-                last_active = y
-                quiet_count = 0
-            elif seen_active:
-                quiet_count += 1
-                if quiet_count >= quiet_run:
-                    break
-
-        return last_active + padding if seen_active else 0
-
-    @staticmethod
-    def _activity_boundary_from_bottom(active_rows: np.ndarray, quiet_run: int, padding: int) -> int:
-        seen_active = False
-        first_active = len(active_rows)
-        quiet_count = 0
-
-        for y in range(len(active_rows) - 1, -1, -1):
-            if active_rows[y]:
-                seen_active = True
-                first_active = y
-                quiet_count = 0
-            elif seen_active:
-                quiet_count += 1
-                if quiet_count >= quiet_run:
-                    break
-
-        return max(0, first_active - padding) if seen_active else len(active_rows)
 
     def _consolidate_candidates(
         self,

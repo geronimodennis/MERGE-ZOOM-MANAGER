@@ -48,11 +48,16 @@ def synthetic_gallery(columns=3, rows=2, tile_size=(160, 90), gap=12, offset=(20
     return image, rects
 
 
+def full_frame_roi(image):
+    height, width = image.shape[:2]
+    return 0, 0, width, height
+
+
 def test_detector_finds_dynamic_gallery_tiles():
     image, _rects = synthetic_gallery()
     detector = ZoomGalleryDetector()
 
-    tiles = detector.detect(image, source_key="zoom")
+    tiles = detector.detect(image, source_key="zoom", roi=full_frame_roi(image))
 
     assert len(tiles) == 6
     assert all(tile.width >= 150 and tile.height >= 80 for tile in tiles)
@@ -80,7 +85,7 @@ def test_detector_consolidates_single_tile_content_fragments():
 
     detector = ZoomGalleryDetector()
 
-    tiles = detector.detect(image, source_key="zoom")
+    tiles = detector.detect(image, source_key="zoom", roi=full_frame_roi(image))
 
     assert len(tiles) == 1
     assert tiles[0].width > 500
@@ -160,7 +165,7 @@ def test_detector_uses_zoom_name_badges_to_infer_full_cards():
 
     detector = ZoomGalleryDetector()
 
-    tiles = detector.detect(image, source_key="zoom")
+    tiles = detector.detect(image, source_key="zoom", roi=full_frame_roi(image))
 
     assert len(tiles) == 2
     assert tiles[0].x <= first_x + 15
@@ -205,8 +210,8 @@ def test_detector_excludes_zoom_top_and_bottom_menu_bars():
     image = np.zeros((1080, 1920, 3), dtype=np.uint8)
     image[:, :] = (17, 20, 22)
 
-    top_menu_h = 92
-    bottom_menu_y = 958
+    top_menu_h = 53
+    bottom_menu_y = 980
     image[:top_menu_h, :] = (17, 20, 22)
     image[bottom_menu_y:, :] = (17, 20, 22)
 
@@ -232,63 +237,35 @@ def test_detector_excludes_zoom_top_and_bottom_menu_bars():
 
     tiles = detector.detect(image, source_key="zoom")
 
-    assert roi[1] >= top_menu_h - 10
-    assert roi[1] + roi[3] <= bottom_menu_y + 10
+    assert roi == (0, top_menu_h, 1920, bottom_menu_y - top_menu_h)
     assert len(tiles) == 2
-    assert all(tile.y >= top_menu_h - 10 for tile in tiles)
-    assert all(tile.y + tile.height <= bottom_menu_y + 10 for tile in tiles)
+    assert all(tile.y >= top_menu_h for tile in tiles)
+    assert all(tile.y + tile.height <= bottom_menu_y for tile in tiles)
 
 
-def test_gallery_roi_follows_variable_zoom_menu_heights():
-    for top_menu_h, bottom_menu_h in ((58, 86), (132, 138)):
-        image = np.zeros((1080, 1920, 3), dtype=np.uint8)
-        image[:, :] = (17, 20, 22)
-
-        bottom_menu_y = image.shape[0] - bottom_menu_h
-        image[:top_menu_h, :] = (17, 20, 22)
-        image[bottom_menu_y:, :] = (17, 20, 22)
-        cv2.putText(image, "Zoom Meeting", (26, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (235, 235, 235), 2)
-        cv2.putText(image, "View", (1810, max(35, top_menu_h - 28)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (235, 235, 235), 2)
-        for x in range(440, 1520, 180):
-            cv2.circle(image, (x, bottom_menu_y + bottom_menu_h // 2), 18, (235, 235, 235), 2)
-
-        card_y = top_menu_h + 24
-        card_bottom = bottom_menu_y - 28
-        card_h = card_bottom - card_y
-        card_w = 880
-        first_x = 80
-        second_x = 960
-        image[card_y:card_bottom, first_x : first_x + card_w] = (34, 34, 34)
-        image[card_y:card_bottom, second_x : second_x + card_w] = (34, 34, 34)
-        cv2.circle(image, (first_x + 440, card_y + card_h // 2), 110, (85, 128, 180), -1)
-        cv2.circle(image, (second_x + 440, card_y + card_h // 2), 110, (90, 145, 115), -1)
-
-        roi = ZoomGalleryDetector._gallery_search_roi(image)
-        roi_bottom = roi[1] + roi[3]
-
-        assert top_menu_h <= roi[1] <= card_y
-        assert bottom_menu_y >= roi_bottom >= card_bottom
-        assert card_y - roi[1] <= 24
-        assert roi_bottom - card_bottom <= 24
-
-
-def test_gallery_roi_finds_bottom_menu_start_when_toolbar_has_quiet_footer():
+def test_gallery_roi_uses_fixed_zoom_menu_dimensions_by_default():
     image = np.zeros((1080, 1920, 3), dtype=np.uint8)
+
+    assert ZoomGalleryDetector._gallery_search_roi(image) == (0, 53, 1920, 927)
+
+
+def test_gallery_roi_height_updates_when_zoom_window_resizes():
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    assert ZoomGalleryDetector._gallery_search_roi(image) == (0, 53, 1280, 567)
+
+
+def test_detector_accepts_manual_roi_override():
+    image = np.zeros((360, 480, 3), dtype=np.uint8)
     image[:, :] = (17, 20, 22)
+    image[280:350, 80:204] = (70, 120, 180)
+    detector = ZoomGalleryDetector()
 
-    bottom_menu_y = 948
-    image[100:bottom_menu_y, 60:960] = (34, 34, 34)
-    image[100:bottom_menu_y, 960:1860] = (34, 34, 34)
-    cv2.line(image, (0, bottom_menu_y), (image.shape[1] - 1, bottom_menu_y), (55, 55, 58), 1)
+    default_tiles = detector.detect(image, source_key="zoom")
+    manual_tiles = detector.detect(image, source_key="zoom", roi=full_frame_roi(image))
 
-    for x in range(350, 1550, 200):
-        cv2.circle(image, (x, bottom_menu_y + 26), 16, (180, 180, 180), 2)
-        cv2.putText(image, "Start", (x - 24, bottom_menu_y + 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
-
-    roi = ZoomGalleryDetector._gallery_search_roi(image)
-    roi_bottom = roi[1] + roi[3]
-
-    assert bottom_menu_y - 16 <= roi_bottom <= bottom_menu_y
+    assert default_tiles == []
+    assert len(manual_tiles) == 1
 
 
 def test_tracker_keeps_ids_when_gallery_layout_changes():
@@ -296,11 +273,11 @@ def test_tracker_keeps_ids_when_gallery_layout_changes():
     tracker = ParticipantTracker()
 
     first_image, _ = synthetic_gallery(columns=3, rows=2)
-    first_tiles = tracker.update(detector.detect(first_image, source_key="zoom"))
+    first_tiles = tracker.update(detector.detect(first_image, source_key="zoom", roi=full_frame_roi(first_image)))
     first_ids = {tile.track_id for tile in first_tiles}
 
     second_image, _ = synthetic_gallery(columns=2, rows=3, tile_size=(150, 84), gap=14, offset=(34, 20))
-    second_tiles = tracker.update(detector.detect(second_image, source_key="zoom"))
+    second_tiles = tracker.update(detector.detect(second_image, source_key="zoom", roi=full_frame_roi(second_image)))
     second_ids = {tile.track_id for tile in second_tiles}
 
     assert len(first_ids) == 6
