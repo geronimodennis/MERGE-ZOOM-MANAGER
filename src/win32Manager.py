@@ -1,17 +1,29 @@
 import win32gui
 
 titles = []
-def winEnumHandler( hwnd, ctx ):
-	global titles
-	if(win32gui.IsWindowVisible( hwnd )):
-		titles.append(str(hwnd) + ':' + win32gui.GetWindowText( hwnd ))
+
+
+def winEnumHandler(hwnd, ctx):
+    global titles
+    title = win32gui.GetWindowText(hwnd)
+    if not title:
+        return
+    if hwnd in (win32gui.GetDesktopWindow(), win32gui.GetShellWindow()):
+        return
+    if not win32gui.IsWindowVisible(hwnd):
+        return
+    left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+    if right - left <= 1 or bottom - top <= 1:
+        return
+    titles.append(str(hwnd) + ":" + title)
+
 
 def getWindowsTitle():
-	global titles
-	titles = []
-	win32gui.EnumWindows(winEnumHandler, None )
+    global titles
+    titles = []
+    win32gui.EnumWindows(winEnumHandler, None)
 
-	return titles
+    return titles
 
 # def getWindowsTitle():
 # 	titles = []

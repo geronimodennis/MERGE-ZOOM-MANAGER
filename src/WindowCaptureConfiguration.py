@@ -161,6 +161,12 @@ class WindowCaptureConfiguration:
             config["captureHandler"] = WindowCapture(hwnd=hwnd)
         else:
             capture_handler.resetCapture(hwnd=hwnd)
+        if not config["captureHandler"].is_valid():
+            messagebox.showwarning(
+                title="Window capture",
+                message="The selected window handle is no longer valid. Refresh the window list and select the Zoom meeting window again.",
+            )
+            return
         self._refresh_preview(config)
 
     def _refresh_preview(self, config, show_large=False):
