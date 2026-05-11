@@ -62,6 +62,8 @@ python demo_live_zoom_sessions.py --sessions 2 --participants 9 --fps 24
 
 Then run `WindowCaptureConfiguration.py`, search for `zoom meeting`, add both demo sessions, and click **RENDER**.
 
+Demo recording: [live-demo-session.mp4](docs/videos/live-demo-session.mp4)
+
 ## Build
 
 Create the redistributable executable from the `src` directory:
