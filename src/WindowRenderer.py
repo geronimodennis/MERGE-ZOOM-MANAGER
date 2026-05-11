@@ -107,7 +107,10 @@ class WindowRenderer:
         cells = snapshot.cells
         debug_message = ""
         if self.showDebugOverlay:
-            debug_frame, debug_cells = self.captureRunnerOnThread.get_live_debug_overlay()
+            debug_frame = snapshot.debug_frame
+            debug_cells = snapshot.debug_cells or []
+            if debug_frame is None:
+                debug_frame, debug_cells = self.captureRunnerOnThread.get_live_debug_overlay()
             if debug_frame is not None:
                 frame = debug_frame
                 cells = debug_cells
@@ -229,6 +232,7 @@ class WindowRenderer:
 
     def menu_ToggleLiveDebugOverlay(self):
         self.showDebugOverlay = not self.showDebugOverlay
+        self.captureRunnerOnThread.set_live_debug_overlay_enabled(self.showDebugOverlay)
 
     def menu_ShowDebugOverlay(self):
         overlay, _cells = self.captureRunnerOnThread.get_live_debug_overlay()

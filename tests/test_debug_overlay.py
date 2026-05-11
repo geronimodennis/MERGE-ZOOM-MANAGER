@@ -6,6 +6,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from CaptureProcessor import CaptureProcessor
+from captureRunnerOnThread import CaptureRunnerOnThread
 from models import ParticipantTile
 
 
@@ -52,3 +53,55 @@ def test_live_debug_overlay_stacks_multiple_capture_sources():
     assert frame.shape[:2] == (140, 120)
     assert cells[0]["rect"] == (8, 10, 40, 30)
     assert cells[1]["rect"] == (12, 94, 36, 24)
+
+
+class FakeDebugProcessor:
+    def __init__(self):
+        self.calls = 0
+        self.tile = ParticipantTile(
+            track_id=4,
+            source_key="fake",
+            rect=(0, 0, 32, 18),
+            crop=np.full((18, 32, 3), 60, dtype=np.uint8),
+        )
+
+    def process_tiles(self):
+        return [self.tile]
+
+    def setChromaKey(self, _chroma_key):
+        return None
+
+    def build_live_debug_overlay(self):
+        self.calls += 1
+        frame = np.full((18, 32, 3), self.calls, dtype=np.uint8)
+        return frame, [{"tile_id": 4, "index": 0, "source_key": "fake", "rect": (0, 0, 32, 18)}]
+
+
+def test_runner_publishes_fresh_debug_frames_when_enabled():
+    runner = CaptureRunnerOnThread([], (0, 177, 64))
+    runner.capPorcessor = FakeDebugProcessor()
+    runner.set_live_debug_overlay_enabled(True)
+
+    runner.threadRunner()
+    first = runner.get_snapshot()
+    runner.threadRunner()
+    second = runner.get_snapshot()
+
+    assert first.debug_frame is not None
+    assert second.debug_frame is not None
+    assert int(first.debug_frame[0, 0, 0]) == 1
+    assert int(second.debug_frame[0, 0, 0]) == 2
+    assert second.debug_cells[0]["tile_id"] == 4
+
+
+def test_runner_clears_debug_frame_when_overlay_is_disabled():
+    runner = CaptureRunnerOnThread([], (0, 177, 64))
+    runner.capPorcessor = FakeDebugProcessor()
+    runner.set_live_debug_overlay_enabled(True)
+    runner.threadRunner()
+
+    runner.set_live_debug_overlay_enabled(False)
+    snapshot = runner.get_snapshot()
+
+    assert snapshot.debug_frame is None
+    assert snapshot.debug_cells == []

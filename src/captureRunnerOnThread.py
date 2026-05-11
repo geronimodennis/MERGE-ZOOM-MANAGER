@@ -22,6 +22,8 @@ class CaptureSnapshot:
     imageListInfo: list
     capture_fps: float
     missing_pins: int
+    debug_frame: Optional[np.ndarray] = None
+    debug_cells: list = None
 
 
 class CaptureRunnerOnThread:
@@ -52,6 +54,9 @@ class CaptureRunnerOnThread:
         self._capture_fps = 0.0
         self._missing_pins = 0
         self._last_logged_fps = 0.0
+        self._debug_overlay_enabled = False
+        self._debug_frame = None
+        self._debug_cells = []
 
         self.initCapturePocessor()
 
@@ -234,7 +239,18 @@ class CaptureRunnerOnThread:
         return composite, missing
 
     def get_live_debug_overlay(self):
-        return self.capPorcessor.build_live_debug_overlay()
+        with self._lock:
+            if self._debug_frame is not None:
+                return self._debug_frame.copy(), list(self._debug_cells)
+        return self._refresh_debug_overlay()
+
+    def set_live_debug_overlay_enabled(self, enabled: bool):
+        with self._lock:
+            self._debug_overlay_enabled = bool(enabled)
+            if not enabled:
+                self._debug_frame = None
+                self._debug_cells = []
+        return self
 
     def get_snapshot(self) -> CaptureSnapshot:
         with self._lock:
@@ -250,6 +266,8 @@ class CaptureRunnerOnThread:
                 ],
                 capture_fps=self._capture_fps,
                 missing_pins=self._missing_pins,
+                debug_frame=self._debug_frame.copy() if self._debug_frame is not None else None,
+                debug_cells=list(self._debug_cells),
             )
 
     def threadRunner(self):
@@ -257,6 +275,8 @@ class CaptureRunnerOnThread:
         tiles = self.capPorcessor.process_tiles()
         composite = stack_tiles(tiles, self.background)
         self._apply_composite(tiles, composite)
+        if self._is_debug_overlay_enabled():
+            self._refresh_debug_overlay()
         return composite.frame
 
     def threadRunnerForImageList(self):
@@ -317,6 +337,19 @@ class CaptureRunnerOnThread:
             self._composite_cells = composite.cells
             if composite.frame is not None:
                 self._framePool.append(composite.frame)
+
+    def _is_debug_overlay_enabled(self):
+        with self._lock:
+            return self._debug_overlay_enabled
+
+    def _refresh_debug_overlay(self):
+        debug_frame, debug_cells = self.capPorcessor.build_live_debug_overlay()
+        with self._lock:
+            self._debug_frame = debug_frame
+            self._debug_cells = list(debug_cells)
+            if debug_frame is not None:
+                return debug_frame.copy(), list(debug_cells)
+        return None, []
 
     def _refresh_group_frame(self):
         with self._lock:
