@@ -63,6 +63,41 @@ def put_centered_text(image, text, center):
     cv2.putText(image, text, (x, y), font, scale, (235, 235, 235), thickness)
 
 
+def zoom_like_gallery_rects(count, tile_size=(160, 90), gap=12, offset=(20, 28)):
+    tile_width, tile_height = tile_size
+    columns = int(np.ceil(np.sqrt(count)))
+    rows = int(np.ceil(count / float(columns)))
+    full_width = columns * tile_width + (columns - 1) * gap
+    rects = []
+    remaining = count
+    for row in range(rows):
+        row_count = min(columns, remaining)
+        remaining -= row_count
+        row_width = row_count * tile_width + (row_count - 1) * gap
+        start_x = offset[0] + int(round((full_width - row_width) / 2.0))
+        y = offset[1] + row * (tile_height + gap)
+        for column in range(row_count):
+            x = start_x + column * (tile_width + gap)
+            rects.append((x, y, tile_width, tile_height))
+    height = offset[1] * 2 + rows * tile_height + (rows - 1) * gap
+    width = offset[0] * 2 + full_width
+    return rects, width, height
+
+
+def synthetic_zoom_like_gallery(count, blank_indexes=None, tile_size=(160, 90), gap=12, offset=(20, 28)):
+    blank_indexes = blank_indexes or set()
+    rects, width, height = zoom_like_gallery_rects(count, tile_size=tile_size, gap=gap, offset=offset)
+    image = np.zeros((height, width, 3), dtype=np.uint8)
+    image[:, :] = (18, 18, 18)
+    colors = [(60, 80, 220), (80, 180, 80), (220, 120, 60), (160, 90, 200), (70, 190, 210), (210, 210, 80)]
+    for index, (x, y, tile_width, tile_height) in enumerate(rects):
+        if index in blank_indexes:
+            continue
+        image[y : y + tile_height, x : x + tile_width] = colors[index % len(colors)]
+        cv2.putText(image, f"P{index + 1}", (x + 18, y + 52), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (245, 245, 245), 2)
+    return image, rects
+
+
 def test_detector_finds_dynamic_gallery_tiles():
     image, _rects = synthetic_gallery()
     detector = ZoomGalleryDetector()
@@ -72,6 +107,118 @@ def test_detector_finds_dynamic_gallery_tiles():
     assert len(tiles) == 6
     assert all(tile.width >= 150 and tile.height >= 80 for tile in tiles)
     assert [tile.rect for tile in tiles] == sorted([tile.rect for tile in tiles], key=lambda rect: (rect[1], rect[0]))
+
+
+def test_detector_completes_blank_tiles_inside_regular_gallery_grid():
+    image, expected_rects = synthetic_gallery()
+    blank_indexes = {2, 4}
+    for index in blank_indexes:
+        x, y, width, height = expected_rects[index]
+        image[y : y + height, x : x + width] = (18, 18, 18)
+
+    detector = ZoomGalleryDetector()
+
+    tiles = detector.detect(image, source_key="zoom", roi=full_frame_roi(image))
+
+    assert len(tiles) == 6
+    assert [tile.rect for tile in tiles] == sorted([tile.rect for tile in tiles], key=lambda rect: (rect[1], rect[0]))
+    blank_like_tiles = [tile for tile in tiles if tile.debug_reason == "gallery-grid-inferred"]
+    assert len(blank_like_tiles) >= 2
+    for expected in expected_rects:
+        ex, ey, ew, eh = expected
+        assert any(abs(tile.x - ex) <= 8 and abs(tile.y - ey) <= 8 and abs(tile.width - ew) <= 10 and abs(tile.height - eh) <= 6 for tile in tiles)
+
+
+def test_detector_completes_zoom_centered_incomplete_last_row():
+    image, expected_rects = synthetic_zoom_like_gallery(5, blank_indexes={4})
+    detector = ZoomGalleryDetector()
+
+    tiles = detector.detect(image, source_key="zoom", roi=full_frame_roi(image))
+
+    assert len(tiles) == 5
+    assert any(tile.debug_reason == "gallery-grid-inferred" for tile in tiles)
+    assert not any(tile.x > expected_rects[-1][0] + expected_rects[-1][2] + 20 and tile.y == expected_rects[-1][1] for tile in tiles)
+    for expected in expected_rects:
+        ex, ey, ew, eh = expected
+        assert any(abs(tile.x - ex) <= 8 and abs(tile.y - ey) <= 8 and abs(tile.width - ew) <= 10 and abs(tile.height - eh) <= 6 for tile in tiles)
+
+
+def test_detector_uses_neon_border_size_and_completes_gallery_grid_inside_roi():
+    image, expected_rects = synthetic_gallery()
+    blank_indexes = {2, 4}
+    for index in blank_indexes:
+        x, y, width, height = expected_rects[index]
+        image[y : y + height, x : x + width] = (18, 18, 18)
+
+    neon_rect = expected_rects[2]
+    x, y, width, height = neon_rect
+    cv2.rectangle(image, (x, y), (x + width - 1, y + height - 1), (40, 255, 90), 4)
+
+    detector = ZoomGalleryDetector()
+
+    tiles = detector.detect(image, source_key="zoom", roi=full_frame_roi(image))
+
+    assert len(tiles) == 6
+    assert any(tile.debug_reason == "zoom-neon-border" and abs(tile.x - x) <= 2 and abs(tile.y - y) <= 2 for tile in tiles)
+    assert any(tile.debug_reason == "gallery-grid-inferred" for tile in tiles)
+    for expected in expected_rects:
+        ex, ey, ew, eh = expected
+        assert any(abs(tile.x - ex) <= 8 and abs(tile.y - ey) <= 8 and abs(tile.width - ew) <= 10 and abs(tile.height - eh) <= 6 for tile in tiles)
+
+
+def test_detector_uses_single_neon_anchor_for_blank_zoom_grid_inside_roi():
+    image, expected_rects = synthetic_zoom_like_gallery(5, blank_indexes=set(range(5)))
+    x, y, width, height = expected_rects[-1]
+    cv2.rectangle(image, (x, y), (x + width - 1, y + height - 1), (40, 255, 90), 4)
+
+    detector = ZoomGalleryDetector()
+
+    tiles = detector.detect(image, source_key="zoom", roi=full_frame_roi(image))
+
+    assert len(tiles) == 5
+    assert any(tile.debug_reason == "zoom-neon-border" for tile in tiles)
+    assert any(tile.debug_reason == "gallery-grid-inferred" for tile in tiles)
+    for expected in expected_rects:
+        ex, ey, ew, eh = expected
+        assert any(abs(tile.x - ex) <= 10 and abs(tile.y - ey) <= 10 and abs(tile.width - ew) <= 10 and abs(tile.height - eh) <= 6 for tile in tiles)
+    assert all(0 <= tile.x and 0 <= tile.y and tile.x + tile.width <= image.shape[1] and tile.y + tile.height <= image.shape[0] for tile in tiles)
+
+
+def test_detector_reconstructs_fragmented_neon_active_speaker_border():
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    image[:, :] = (18, 18, 18)
+    expected = (340, 180, 533, 300)
+    x, y, width, height = expected
+    neon = (40, 255, 90)
+
+    cv2.line(image, (x, y + 1), (x + width - 1, y + 1), neon, 3)
+    cv2.line(image, (x, y + height - 2), (x + width - 1, y + height - 2), neon, 3)
+    cv2.line(image, (x + 1, y + 14), (x + 1, y + height - 15), neon, 3)
+    cv2.line(image, (x + width - 2, y + 14), (x + width - 2, y + height - 15), neon, 3)
+    cv2.rectangle(image, (x + 8, y + height - 31), (x + 132, y + height - 9), (32, 32, 32), -1)
+    cv2.putText(image, "Dennis", (x + 30, y + height - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (245, 245, 245), 1)
+
+    detector = ZoomGalleryDetector()
+
+    candidates = detector._detect_from_neon_tile_borders(image, full_frame_roi(image))
+    tiles = detector.detect(image, source_key="zoom", roi=full_frame_roi(image))
+
+    assert any(abs(candidate.rect[0] - x) <= 2 and abs(candidate.rect[1] - y) <= 2 and abs(candidate.rect[2] - width) <= 4 and abs(candidate.rect[3] - height) <= 4 for candidate in candidates)
+    assert any(tile.debug_reason == "zoom-neon-border" and abs(tile.x - x) <= 2 and abs(tile.y - y) <= 2 and abs(tile.width - width) <= 4 and abs(tile.height - height) <= 4 for tile in tiles)
+
+
+def test_neon_border_search_ignores_neon_outside_manual_roi():
+    image = np.zeros((360, 640, 3), dtype=np.uint8)
+    image[:, :] = (18, 18, 18)
+    cv2.rectangle(image, (30, 20), (220, 126), (40, 255, 90), 4)
+    roi = (0, 160, 640, 180)
+    detector = ZoomGalleryDetector()
+
+    candidates = detector._detect_from_neon_tile_borders(image, roi)
+    tiles = detector.detect(image, source_key="zoom", roi=roi)
+
+    assert candidates == []
+    assert tiles == []
 
 
 def test_detector_consolidates_single_tile_content_fragments():
@@ -239,6 +386,104 @@ def test_detector_uses_name_badges_for_gray_open_camera_tiles_without_edges():
     assert [tile.x for tile in tiles] == sorted(tile.x for tile in tiles)
 
 
+def test_detector_prefers_name_badge_layout_over_open_camera_texture():
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    image[:, :] = (34, 34, 34)
+
+    card_y = 150
+    card_h = 310
+    card_w = 552
+    card_xs = [70, 658]
+    for index, card_x in enumerate(card_xs):
+        yy, xx = np.indices((card_h, card_w))
+        texture = (((xx * 3 + yy * 5 + index * 4) % 11) - 5).astype(np.int16)
+        tile = np.clip(34 + texture, 0, 255).astype(np.uint8)
+        image[card_y : card_y + card_h, card_x : card_x + card_w] = np.dstack((tile, tile, tile))
+
+        badge_x = card_x + 8
+        badge_y = card_y + card_h - 30
+        cv2.rectangle(image, (badge_x, badge_y), (badge_x + 118, badge_y + 28), (32, 32, 32), -1)
+        cv2.circle(image, (badge_x + 13, badge_y + 14), 8, (45, 45, 235), -1)
+        cv2.putText(
+            image,
+            f"Open {index + 1}",
+            (badge_x + 30, badge_y + 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            (245, 245, 245),
+            2,
+        )
+
+    detector = ZoomGalleryDetector()
+
+    tiles = detector.detect(image, source_key="zoom", roi=full_frame_roi(image))
+
+    assert len(tiles) == 2
+    assert [tile.debug_reason for tile in tiles] == ["zoom-name-badge-layout", "zoom-name-badge-layout"]
+    assert all(abs(tile.y - card_y) <= 12 for tile in tiles)
+    assert all(abs(tile.width - card_w) <= 32 for tile in tiles)
+    assert all(abs(tile.height - card_h) <= 16 for tile in tiles)
+
+
+def test_detector_finds_low_contrast_open_camera_texture_rectangles_without_badges():
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    image[:, :] = (34, 34, 34)
+
+    card_y = 150
+    card_h = 310
+    card_w = 552
+    card_xs = [70, 658]
+    for index, card_x in enumerate(card_xs):
+        yy, xx = np.indices((card_h, card_w))
+        texture = (((xx * 3 + yy * 5 + index * 4) % 11) - 5).astype(np.int16)
+        tile = np.clip(34 + texture, 0, 255).astype(np.uint8)
+        image[card_y : card_y + card_h, card_x : card_x + card_w] = np.dstack((tile, tile, tile))
+
+    detector = ZoomGalleryDetector()
+
+    tiles = detector.detect(image, source_key="zoom", roi=full_frame_roi(image))
+
+    assert len(tiles) == 2
+    assert [tile.debug_reason for tile in tiles] == ["open-camera-texture", "open-camera-texture"]
+    assert all(abs(tile.y - card_y) <= 8 for tile in tiles)
+    assert all(abs(tile.width - card_w) <= 18 for tile in tiles)
+    assert all(abs(tile.height - card_h) <= 16 for tile in tiles)
+
+
+def test_detector_uses_badge_column_bands_for_landscape_low_contrast_tiles():
+    image = np.zeros((279, 490, 3), dtype=np.uint8)
+    image[:, :] = (8, 8, 8)
+    image[:, 4:169] = (34, 34, 34)
+    image[:, 169:321] = (0, 0, 0)
+    image[:, 321:486] = (34, 34, 34)
+    image[:4, :245] = (0, 170, 100)
+
+    cv2.rectangle(image, (8, 253), (132, 274), (32, 32, 32), -1)
+    cv2.circle(image, (17, 263), 7, (40, 40, 220), -1)
+    cv2.line(image, (12, 270), (21, 256), (245, 245, 245), 1)
+    cv2.putText(
+        image,
+        "Dennis Geronimo",
+        (28, 268),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.42,
+        (245, 245, 245),
+        1,
+        cv2.LINE_AA,
+    )
+
+    detector = ZoomGalleryDetector()
+
+    tiles = detector.detect(image, source_key="zoom", roi=full_frame_roi(image))
+
+    assert len(tiles) == 3
+    assert [tile.debug_reason for tile in tiles] == ["zoom-column-layout", "zoom-column-layout", "zoom-column-layout"]
+    assert [(tile.x, tile.width) for tile in tiles] == [(4, 165), (169, 152), (321, 165)]
+    assert [tile.height for tile in tiles] == [93, 93, 93]
+    assert all(tile.y + tile.height == image.shape[0] for tile in tiles)
+    assert all(tile.width > tile.height for tile in tiles)
+
+
 def test_detector_uses_gallery_rectangles_before_inner_fragments():
     image = np.zeros((1080, 1920, 3), dtype=np.uint8)
     image[:, :] = (17, 20, 22)
@@ -268,6 +513,27 @@ def test_detector_uses_gallery_rectangles_before_inner_fragments():
     assert abs(tiles[0].height - card_h) < 30
     assert abs(tiles[1].x - second_x) < 20
     assert abs(tiles[1].width - card_w) < 30
+
+
+def test_detector_accepts_half_hd_two_column_gallery_tiles():
+    image = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    image[:, :] = (17, 20, 22)
+
+    card_y = 210
+    card_h = 540
+    card_w = 960
+    image[card_y : card_y + card_h, 0:card_w] = (34, 34, 34)
+    image[card_y : card_y + card_h, card_w : card_w * 2] = (34, 34, 34)
+    cv2.ellipse(image, (480, card_y + 310), (92, 128), 0, 0, 360, (108, 150, 190), -1)
+    cv2.circle(image, (card_w + 480, card_y + 315), 112, (72, 116, 172), -1)
+
+    detector = ZoomGalleryDetector()
+
+    tiles = detector.detect(image, source_key="zoom", roi=full_frame_roi(image))
+
+    assert len(tiles) == 2
+    assert [tile.debug_reason for tile in tiles] == ["gallery-rectangle-split", "gallery-rectangle-split"]
+    assert [(tile.x, tile.width, tile.height) for tile in tiles] == [(0, card_w, card_h), (card_w, card_w, card_h)]
 
 
 def test_detector_excludes_zoom_top_and_bottom_menu_bars():
@@ -353,14 +619,34 @@ def test_detector_rejects_participant_rectangles_larger_than_max_bound():
     detector = ZoomGalleryDetector()
 
     assert detector._is_valid_rect((0, 0, MAX_PARTICIPANT_RECT_WIDTH, MAX_PARTICIPANT_RECT_HEIGHT), 1920, 1080)
+    assert not detector._is_landscape_rect((0, 0, 120, 160))
+    assert not detector._is_landscape_rect((0, 0, 125, 119))
+    assert detector._is_landscape_rect((0, 0, 533, 300))
     assert not detector._is_valid_rect((0, 0, MAX_PARTICIPANT_RECT_WIDTH + 1, MAX_PARTICIPANT_RECT_HEIGHT), 1920, 1080)
     assert not detector._is_valid_rect((0, 0, MAX_PARTICIPANT_RECT_WIDTH, MAX_PARTICIPANT_RECT_HEIGHT + 1), 1920, 1080)
+
+
+def test_detector_removes_large_overlaps_but_allows_tiny_edge_slop():
+    detector = ZoomGalleryDetector()
+    candidates = [
+        DetectionCandidate((100, 100, 533, 300), 0.997, "zoom-neon-border"),
+        DetectionCandidate((430, 360, 160, 90), 0.96, "zoom-name-badge-layout"),
+        DetectionCandidate((635, 100, 533, 300), 0.93, "gallery-grid-inferred"),
+        DetectionCandidate((1166, 100, 533, 300), 0.93, "gallery-grid-inferred"),
+    ]
+
+    filtered = detector._remove_excessive_tile_overlaps(candidates)
+
+    assert (100, 100, 533, 300) in [candidate.rect for candidate in filtered]
+    assert (430, 360, 160, 90) not in [candidate.rect for candidate in filtered]
+    assert (635, 100, 533, 300) in [candidate.rect for candidate in filtered]
+    assert (1166, 100, 533, 300) in [candidate.rect for candidate in filtered]
 
 
 def test_detector_uses_greenish_light_rectangle_when_normal_detection_fails():
     image = np.zeros((1080, 1920, 3), dtype=np.uint8)
     image[:, :] = (17, 20, 22)
-    image[260:820, 450:1450] = (112, 174, 132)
+    image[220:860, 360:1560] = (112, 174, 132)
     detector = ZoomGalleryDetector()
 
     tiles = detector.detect(image, source_key="zoom", roi=full_frame_roi(image))

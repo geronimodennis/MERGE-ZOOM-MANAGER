@@ -36,5 +36,5 @@ src\dist\MERGE-ZOOM-MANAGER.exe
 Suggested tag format:
 
 ```text
-v1.7.0
+v1.8.1
 ```

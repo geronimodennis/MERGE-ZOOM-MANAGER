@@ -9,14 +9,21 @@ from models import ParticipantTile, Rect
 
 DEFAULT_TOP_MENU_HEIGHT = 53
 DEFAULT_BOTTOM_MENU_HEIGHT = 100
-MAX_PARTICIPANT_RECT_WIDTH = 945
-MAX_PARTICIPANT_RECT_HEIGHT = 535
-PROBABLE_PARTICIPANT_RECT_WIDTH = 945
-PROBABLE_PARTICIPANT_RECT_HEIGHT = 535
+MAX_PARTICIPANT_RECT_WIDTH = 1024
+MAX_PARTICIPANT_RECT_HEIGHT = 576
+PROBABLE_PARTICIPANT_RECT_WIDTH = 1024
+PROBABLE_PARTICIPANT_RECT_HEIGHT = 576
+MIN_LANDSCAPE_PARTICIPANT_ASPECT = 1.20
+MAX_ACCEPTABLE_TILE_OVERLAP_RATIO = 0.03
+MAX_ACCEPTABLE_EDGE_OVERLAP_RATIO = 0.08
 DETECTION_SCAN_MAX_WIDTH = 960
 STABLE_TILE_REASONS = {
+    "gallery-grid-inferred",
     "gallery-rectangle",
     "gallery-rectangle-split",
+    "open-camera-texture",
+    "zoom-neon-border",
+    "zoom-column-layout",
     "zoom-name-badge-layout",
     "center-name-layout",
     "greenish-light-base-rectangle",
@@ -63,23 +70,33 @@ class ZoomGalleryDetector:
         candidates = []
         candidates.extend(self._detect_from_projection(image, gallery_roi))
         candidates.extend(self._detect_from_edges(image, gallery_roi))
-        gallery_rect_candidates = self._detect_from_gallery_rectangles(image, gallery_roi)
-        zoom_layout_candidates = self._detect_from_zoom_name_badges(image, candidates, gallery_roi)
+        neon_border_candidates = self._detect_from_neon_tile_borders(image, gallery_roi)
+        gallery_rect_candidates = self._dedupe(neon_border_candidates + self._detect_from_gallery_rectangles(image, gallery_roi))
+        zoom_layout_candidates = self._detect_from_zoom_name_badges(image, candidates + neon_border_candidates, gallery_roi)
 
         if gallery_rect_candidates and len(gallery_rect_candidates) >= len(zoom_layout_candidates):
             candidates = gallery_rect_candidates
         elif zoom_layout_candidates:
-            candidates = zoom_layout_candidates
+            candidates = self._dedupe(neon_border_candidates + zoom_layout_candidates)
         else:
-            candidates = self._consolidate_candidates(image, candidates)
+            open_camera_candidates = self._detect_from_open_camera_texture(image, gallery_roi)
+            base_candidates = candidates + neon_border_candidates
+            if open_camera_candidates and (not base_candidates or self._candidates_look_like_tiles(open_camera_candidates)):
+                candidates = self._dedupe(neon_border_candidates + open_camera_candidates)
+            else:
+                candidates = self._consolidate_candidates(image, base_candidates + open_camera_candidates)
         candidates.extend(self._detect_from_centered_names(image, gallery_roi, candidates))
         candidates = [candidate for candidate in candidates if self._rect_inside_roi(candidate.rect, gallery_roi)]
         candidates = self._dedupe(candidates)
         candidates = self._remove_overlapping_unstable_boxes(candidates)
         candidates = self._remove_containing_boxes(candidates)
         candidates = self._filter_inconsistent_tile_sizes(candidates)
+        candidates = [candidate for candidate in candidates if self._is_landscape_rect(candidate.rect)]
+        candidates = self._complete_gallery_grid(candidates, gallery_roi, image.shape[1], image.shape[0])
         if not candidates:
             candidates = self._detect_initial_base_rectangle(image, gallery_roi)
+            candidates = [candidate for candidate in candidates if self._is_landscape_rect(candidate.rect)]
+        candidates = self._remove_excessive_tile_overlaps(candidates)
         candidates.sort(key=lambda item: (item.rect[1], item.rect[0]))
 
         tiles: List[ParticipantTile] = []
@@ -252,6 +269,689 @@ class ZoomGalleryDetector:
             return False
         return self._is_valid_rect(rect, image_width, image_height)
 
+    def _detect_from_neon_tile_borders(self, image: np.ndarray, roi_rect: Rect | None = None) -> List[DetectionCandidate]:
+        image_height, image_width = image.shape[:2]
+        roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi_rect)
+        roi, scan_scale = self._scaled_search_image(image, (roi_x, roi_y, roi_width, roi_height), max_width=1920)
+        if roi.size == 0:
+            return []
+
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        hue, saturation, value = cv2.split(hsv)
+        green_yellow = (hue >= 18) & (hue <= 95)
+        neon_mask = (green_yellow & (saturation >= 80) & (value >= 135)).astype(np.uint8) * 255
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        neon_mask = cv2.morphologyEx(neon_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+        contours, _ = cv2.findContours(neon_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        candidates: List[DetectionCandidate] = self._detect_neon_rectangles_from_line_runs(
+            neon_mask,
+            roi_x,
+            roi_y,
+            scan_scale,
+            image_width,
+            image_height,
+        )
+        scan_height, scan_width = neon_mask.shape[:2]
+        for contour in contours:
+            x, y, width, height = cv2.boundingRect(contour)
+            if width < max(48, int(scan_width * 0.045)) or height < max(42, int(scan_height * 0.05)):
+                continue
+
+            rect_mask = neon_mask[y : y + height, x : x + width]
+            if rect_mask.size == 0:
+                continue
+            border = max(2, min(width, height) // 28)
+            perimeter_mask = np.zeros(rect_mask.shape, dtype=np.uint8)
+            perimeter_mask[:border, :] = 1
+            perimeter_mask[-border:, :] = 1
+            perimeter_mask[:, :border] = 1
+            perimeter_mask[:, -border:] = 1
+            perimeter_pixels = int(np.count_nonzero(perimeter_mask))
+            perimeter_hits = int(np.count_nonzero(rect_mask[perimeter_mask > 0]))
+            perimeter_coverage = perimeter_hits / float(max(1, perimeter_pixels))
+            fill_ratio = float(np.count_nonzero(rect_mask)) / float(max(1, rect_mask.size))
+            if perimeter_coverage < 0.22 or fill_ratio > 0.22:
+                continue
+
+            absolute_rect = self._absolute_rect_from_scan((x, y, width, height), roi_x, roi_y, scan_scale)
+            if not self._is_gallery_card_rect(absolute_rect, image_width, image_height):
+                continue
+            candidates.append(DetectionCandidate(absolute_rect, 0.995, "zoom-neon-border"))
+
+        return sorted(self._dedupe(candidates), key=lambda item: (item.rect[1], item.rect[0]))
+
+    def _detect_neon_rectangles_from_line_runs(
+        self,
+        neon_mask: np.ndarray,
+        roi_x: int,
+        roi_y: int,
+        scan_scale: float,
+        image_width: int,
+        image_height: int,
+    ) -> List[DetectionCandidate]:
+        scan_height, scan_width = neon_mask.shape[:2]
+        if scan_width <= 0 or scan_height <= 0:
+            return []
+
+        horizontal_segments = self._neon_horizontal_line_segments(neon_mask)
+        vertical_segments = self._neon_vertical_line_segments(neon_mask)
+        candidates: List[DetectionCandidate] = []
+        horizontal_rects: List[Rect] = []
+        vertical_rects: List[Rect] = []
+
+        for top_index, top in enumerate(horizontal_segments):
+            for bottom in horizontal_segments[top_index + 1 :]:
+                left = max(top[0], bottom[0])
+                right = min(top[1], bottom[1])
+                if right - left < max(72, int(scan_width * 0.06)):
+                    continue
+
+                width_similarity = min(top[1] - top[0], bottom[1] - bottom[0]) / float(max(1, max(top[1] - top[0], bottom[1] - bottom[0])))
+                if width_similarity < 0.72:
+                    continue
+
+                scan_rect = (min(top[0], bottom[0]), top[2], max(top[1], bottom[1]) - min(top[0], bottom[0]), bottom[3] - top[2])
+                horizontal_rects.append(scan_rect)
+                rect = self._absolute_rect_from_scan(scan_rect, roi_x, roi_y, scan_scale)
+                if self._is_gallery_card_rect(rect, image_width, image_height):
+                    candidates.append(DetectionCandidate(rect, 0.996, "zoom-neon-border"))
+
+        for left_index, left_segment in enumerate(vertical_segments):
+            for right_segment in vertical_segments[left_index + 1 :]:
+                top = max(left_segment[2], right_segment[2])
+                bottom = min(left_segment[3], right_segment[3])
+                if bottom - top < max(56, int(scan_height * 0.06)):
+                    continue
+
+                height_similarity = min(left_segment[3] - left_segment[2], right_segment[3] - right_segment[2]) / float(
+                    max(1, max(left_segment[3] - left_segment[2], right_segment[3] - right_segment[2]))
+                )
+                if height_similarity < 0.72:
+                    continue
+
+                scan_rect = (
+                    left_segment[0],
+                    min(left_segment[2], right_segment[2]),
+                    right_segment[1] - left_segment[0],
+                    max(left_segment[3], right_segment[3]) - min(left_segment[2], right_segment[2]),
+                )
+                vertical_rects.append(scan_rect)
+                rect = self._absolute_rect_from_scan(scan_rect, roi_x, roi_y, scan_scale)
+                if self._is_gallery_card_rect(rect, image_width, image_height):
+                    candidates.append(DetectionCandidate(rect, 0.996, "zoom-neon-border"))
+
+        for horizontal_rect in horizontal_rects:
+            for vertical_rect in vertical_rects:
+                if not self._neon_line_pair_rects_match(horizontal_rect, vertical_rect):
+                    continue
+
+                left = min(horizontal_rect[0], vertical_rect[0])
+                top = min(horizontal_rect[1], vertical_rect[1])
+                right = max(horizontal_rect[0] + horizontal_rect[2], vertical_rect[0] + vertical_rect[2])
+                bottom = max(horizontal_rect[1] + horizontal_rect[3], vertical_rect[1] + vertical_rect[3])
+                rect = (left, top, right - left, bottom - top)
+                rect = self._absolute_rect_from_scan(rect, roi_x, roi_y, scan_scale)
+                if self._is_gallery_card_rect(rect, image_width, image_height):
+                    candidates.append(DetectionCandidate(rect, 0.997, "zoom-neon-border"))
+
+        return self._dedupe(candidates)
+
+    @staticmethod
+    def _neon_line_pair_rects_match(horizontal_rect: Rect, vertical_rect: Rect) -> bool:
+        hx, hy, hw, hh = horizontal_rect
+        vx, vy, vw, vh = vertical_rect
+        overlap_x = max(0, min(hx + hw, vx + vw) - max(hx, vx))
+        overlap_y = max(0, min(hy + hh, vy + vh) - max(hy, vy))
+        x_ratio = overlap_x / float(max(1, min(hw, vw)))
+        y_ratio = overlap_y / float(max(1, min(hh, vh)))
+        center_dx = abs((hx + hw / 2.0) - (vx + vw / 2.0)) / float(max(1, max(hw, vw)))
+        center_dy = abs((hy + hh / 2.0) - (vy + vh / 2.0)) / float(max(1, max(hh, vh)))
+        return x_ratio >= 0.70 and y_ratio >= 0.70 and center_dx <= 0.12 and center_dy <= 0.12
+
+    def _neon_horizontal_line_segments(self, neon_mask: np.ndarray) -> List[Rect]:
+        scan_height, scan_width = neon_mask.shape[:2]
+        row_counts = np.count_nonzero(neon_mask, axis=1)
+        row_threshold = max(48, int(scan_width * 0.045))
+        row_runs = self._merge_close_segments(self._runs(row_counts >= row_threshold), max(2, scan_height // 240))
+
+        segments: List[Rect] = []
+        for start_y, end_y in row_runs:
+            stripe = neon_mask[start_y:end_y, :]
+            if stripe.size == 0:
+                continue
+            col_counts = np.count_nonzero(stripe, axis=0)
+            col_runs = self._merge_close_segments(self._runs(col_counts > 0), max(4, scan_width // 320))
+            for start_x, end_x in col_runs:
+                if end_x - start_x >= max(72, int(scan_width * 0.06)):
+                    segments.append((start_x, end_x, start_y, end_y))
+        return segments
+
+    def _neon_vertical_line_segments(self, neon_mask: np.ndarray) -> List[Rect]:
+        scan_height, scan_width = neon_mask.shape[:2]
+        col_counts = np.count_nonzero(neon_mask, axis=0)
+        col_threshold = max(42, int(scan_height * 0.045))
+        col_runs = self._merge_close_segments(self._runs(col_counts >= col_threshold), max(2, scan_width // 240))
+
+        segments: List[Rect] = []
+        for start_x, end_x in col_runs:
+            stripe = neon_mask[:, start_x:end_x]
+            if stripe.size == 0:
+                continue
+            row_counts = np.count_nonzero(stripe, axis=1)
+            row_runs = self._merge_close_segments(self._runs(row_counts > 0), max(4, scan_height // 320))
+            for start_y, end_y in row_runs:
+                if end_y - start_y >= max(56, int(scan_height * 0.06)):
+                    segments.append((start_x, end_x, start_y, end_y))
+        return segments
+
+    def _detect_from_open_camera_texture(self, image: np.ndarray, roi_rect: Rect | None = None) -> List[DetectionCandidate]:
+        image_height, image_width = image.shape[:2]
+        roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi_rect)
+        roi, scan_scale = self._scaled_search_image(image, (roi_x, roi_y, roi_width, roi_height), max_width=1920)
+        if roi.size == 0:
+            return []
+
+        scan_height, scan_width = roi.shape[:2]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        kernel_size = max(7, min(scan_width, scan_height) // 70)
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+
+        mean = cv2.GaussianBlur(gray, (kernel_size, kernel_size), 0)
+        squared_mean = cv2.GaussianBlur(gray * gray, (kernel_size, kernel_size), 0)
+        local_std = np.sqrt(np.maximum(squared_mean - mean * mean, 0.0))
+
+        textured_values = local_std[local_std > 0.35]
+        if textured_values.size < max(32, int(scan_width * scan_height * 0.002)):
+            return []
+
+        threshold = max(1.6, min(8.0, float(np.percentile(textured_values, 75)) * 0.72))
+        mask = (local_std >= threshold).astype(np.uint8) * 255
+
+        close_kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (max(11, scan_width // 80), max(9, scan_height // 90)),
+        )
+        open_kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (max(5, scan_width // 180), max(5, scan_height // 180)),
+        )
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel, iterations=2)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel, iterations=1)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        candidates: List[DetectionCandidate] = []
+        for contour in contours:
+            x, y, width, height = cv2.boundingRect(contour)
+            if width < max(90, int(scan_width * 0.08)) or height < max(70, int(scan_height * 0.08)):
+                continue
+
+            region = mask[y : y + height, x : x + width]
+            fill_ratio = float(np.count_nonzero(region)) / float(max(1, region.size))
+            if fill_ratio < 0.16:
+                continue
+
+            absolute_rect = self._absolute_rect_from_scan((x, y, width, height), roi_x, roi_y, scan_scale)
+            absolute_rect = self._snap_texture_rect_to_badges(image, absolute_rect, (roi_x, roi_y, roi_width, roi_height))
+            if not self._is_gallery_card_rect(absolute_rect, image_width, image_height):
+                continue
+            candidates.append(DetectionCandidate(absolute_rect, min(0.94, 0.72 + fill_ratio * 0.22), "open-camera-texture"))
+
+        candidates = self._dedupe(candidates)
+        candidates = self._remove_containing_boxes(candidates)
+        return sorted(candidates, key=lambda item: (item.rect[1], item.rect[0]))
+
+    def _complete_gallery_grid(
+        self,
+        candidates: List[DetectionCandidate],
+        roi: Rect,
+        image_width: int,
+        image_height: int,
+    ) -> List[DetectionCandidate]:
+        cardish = [candidate for candidate in candidates if self._is_cardish_aspect(candidate.rect)]
+        neon_candidates = [candidate for candidate in cardish if candidate.reason == "zoom-neon-border"]
+        if len(cardish) < 3 and not neon_candidates:
+            return candidates
+
+        trusted_size_candidates = neon_candidates or cardish
+        heights = np.array([candidate.rect[3] for candidate in trusted_size_candidates], dtype=np.float32)
+        widths = np.array([candidate.rect[2] for candidate in trusted_size_candidates], dtype=np.float32)
+        tile_height = int(round(float(np.median(heights))))
+        tile_width = int(round(float(np.median(widths))))
+        aspect_width = int(round(tile_height * 16.0 / 9.0))
+        if abs(aspect_width - tile_width) <= max(12, tile_width * 0.12):
+            tile_width = aspect_width
+        tile_width, tile_height = self._clamp_participant_size(tile_width, tile_height)
+        if tile_width <= 0 or tile_height <= 0:
+            return candidates
+
+        if neon_candidates and len(cardish) < 3:
+            neon_layout = self._complete_neon_gallery_layout(
+                candidates,
+                cardish,
+                neon_candidates,
+                tile_width,
+                tile_height,
+                roi,
+                image_width,
+                image_height,
+            )
+            if neon_layout is not None:
+                return neon_layout
+            return candidates
+
+        zoom_layout = self._complete_zoom_gallery_layout(candidates, cardish, tile_width, tile_height, roi, image_width, image_height)
+        if zoom_layout is not None:
+            return zoom_layout
+
+        roi_x, roi_y, roi_width, roi_height = roi
+        centers_x = [candidate.rect[0] + candidate.rect[2] / 2.0 for candidate in cardish]
+        centers_y = [candidate.rect[1] + candidate.rect[3] / 2.0 for candidate in cardish]
+        grid_centers_x = self._axis_grid_centers(centers_x, tile_width)
+        grid_centers_y = self._axis_grid_centers(centers_y, tile_height)
+        if not grid_centers_x or not grid_centers_y:
+            return candidates
+
+        inferred: List[DetectionCandidate] = []
+        for center_y in grid_centers_y:
+            for center_x in grid_centers_x:
+                rect = self._rect_from_center(center_x, center_y, tile_width, tile_height)
+                if not self._is_valid_rect(rect, image_width, image_height):
+                    continue
+                if not self._rect_inside_roi(rect, roi):
+                    continue
+                inferred.append(DetectionCandidate(rect, 0.93, "gallery-grid-inferred"))
+
+        if len(inferred) <= len(candidates) or len(inferred) > 49:
+            return candidates
+        if not self._grid_explains_candidates(cardish, inferred):
+            return candidates
+
+        return self._dedupe(candidates + inferred)
+
+    def _complete_neon_gallery_layout(
+        self,
+        candidates: List[DetectionCandidate],
+        cardish: List[DetectionCandidate],
+        neon_candidates: List[DetectionCandidate],
+        tile_width: int,
+        tile_height: int,
+        roi: Rect,
+        image_width: int,
+        image_height: int,
+    ) -> List[DetectionCandidate] | None:
+        step_x = self._estimate_horizontal_gallery_step(cardish, tile_width, tile_height)
+        step_y = self._estimate_axis_step([candidate.rect[1] + candidate.rect[3] / 2.0 for candidate in cardish], tile_height)
+        if step_x is None:
+            step_x = tile_width + max(6, int(round(tile_width * 0.045)))
+        if step_y is None:
+            step_y = tile_height + max(6, int(round(tile_height * 0.045)))
+
+        candidate_centers = [(candidate.rect[0] + candidate.rect[2] / 2.0, candidate.rect[1] + candidate.rect[3] / 2.0) for candidate in cardish]
+        best_layout = None
+        best_score = None
+
+        for participant_count in range(max(1, len(cardish)), 50):
+            layout_centers = self._zoom_gallery_layout_centers(participant_count, tile_width, tile_height, step_x, step_y)
+            if not layout_centers:
+                continue
+
+            for neon in neon_candidates:
+                neon_center = (neon.rect[0] + neon.rect[2] / 2.0, neon.rect[1] + neon.rect[3] / 2.0)
+                for layout_center_x, layout_center_y in layout_centers:
+                    offset_x = neon_center[0] - layout_center_x
+                    offset_y = neon_center[1] - layout_center_y
+                    translated = [(center_x + offset_x, center_y + offset_y) for center_x, center_y in layout_centers]
+                    rects = [self._rect_from_center(center_x, center_y, tile_width, tile_height) for center_x, center_y in translated]
+                    if not all(self._is_valid_rect(rect, image_width, image_height) and self._rect_inside_roi(rect, roi) for rect in rects):
+                        continue
+
+                    match_count, average_distance = self._match_layout_centers(candidate_centers, translated, tile_width, tile_height)
+                    if match_count < len(cardish):
+                        continue
+
+                    bbox = self._layout_bbox_from_centers(translated, tile_width, tile_height)
+                    coverage_penalty = self._layout_coverage_penalty(bbox, roi)
+                    center_penalty = self._layout_center_penalty(bbox, roi, tile_width, tile_height)
+                    score = (coverage_penalty, center_penalty, participant_count, average_distance)
+                    if best_score is None or score < best_score:
+                        best_score = score
+                        best_layout = translated
+
+        if best_layout is None:
+            return None
+
+        inferred = [
+            DetectionCandidate(self._rect_from_center(center_x, center_y, tile_width, tile_height), 0.93, "gallery-grid-inferred")
+            for center_x, center_y in best_layout
+        ]
+        if len(inferred) <= len(candidates) or len(inferred) > 49:
+            return None
+        return self._dedupe(candidates + inferred)
+
+    def _complete_zoom_gallery_layout(
+        self,
+        candidates: List[DetectionCandidate],
+        cardish: List[DetectionCandidate],
+        tile_width: int,
+        tile_height: int,
+        roi: Rect,
+        image_width: int,
+        image_height: int,
+    ) -> List[DetectionCandidate] | None:
+        if len(cardish) < 3:
+            return None
+
+        row_centers = self._cluster_axis_values(
+            [candidate.rect[1] + candidate.rect[3] / 2.0 for candidate in cardish],
+            max(8.0, tile_height * 0.35),
+        )
+        if len(row_centers) < 2:
+            return None
+
+        step_x = self._estimate_horizontal_gallery_step(cardish, tile_width, tile_height)
+        step_y = self._estimate_axis_step(row_centers, tile_height)
+        if step_x is None:
+            step_x = tile_width + max(6, int(round(tile_width * 0.045)))
+        if step_y is None:
+            step_y = tile_height + max(6, int(round(tile_height * 0.045)))
+
+        best_layout = None
+        best_score = None
+        for participant_count in range(len(cardish), 50):
+            layout_centers = self._zoom_gallery_layout_centers(participant_count, tile_width, tile_height, step_x, step_y)
+            if not layout_centers:
+                continue
+
+            scored = self._score_zoom_layout(cardish, layout_centers, tile_width, tile_height, roi, image_width, image_height)
+            if scored is None:
+                continue
+
+            match_count, average_distance, translated_centers = scored
+            unmatched = len(cardish) - match_count
+            if unmatched > max(1, len(cardish) // 6):
+                continue
+
+            score = (unmatched, participant_count, average_distance)
+            if best_score is None or score < best_score:
+                best_score = score
+                best_layout = translated_centers
+
+        if best_layout is None:
+            return None
+
+        inferred = [
+            DetectionCandidate(
+                self._rect_from_center(center_x, center_y, tile_width, tile_height),
+                0.93,
+                "gallery-grid-inferred",
+            )
+            for center_x, center_y in best_layout
+        ]
+        if len(inferred) <= len(candidates) or len(inferred) > 49:
+            return None
+        if not self._grid_explains_candidates(cardish, inferred):
+            return None
+        return self._dedupe(candidates + inferred)
+
+    def _score_zoom_layout(
+        self,
+        cardish: List[DetectionCandidate],
+        layout_centers: List[Tuple[float, float]],
+        tile_width: int,
+        tile_height: int,
+        roi: Rect,
+        image_width: int,
+        image_height: int,
+    ) -> Tuple[int, float, List[Tuple[float, float]]] | None:
+        candidate_centers = [(candidate.rect[0] + candidate.rect[2] / 2.0, candidate.rect[1] + candidate.rect[3] / 2.0) for candidate in cardish]
+        best = None
+
+        for candidate_center_x, candidate_center_y in candidate_centers:
+            for layout_center_x, layout_center_y in layout_centers:
+                offset_x = candidate_center_x - layout_center_x
+                offset_y = candidate_center_y - layout_center_y
+                translated = [(center_x + offset_x, center_y + offset_y) for center_x, center_y in layout_centers]
+                rects = [self._rect_from_center(center_x, center_y, tile_width, tile_height) for center_x, center_y in translated]
+                if not all(self._is_valid_rect(rect, image_width, image_height) and self._rect_inside_roi(rect, roi) for rect in rects):
+                    continue
+
+                match_count, average_distance = self._match_layout_centers(candidate_centers, translated, tile_width, tile_height)
+                if match_count < max(3, int(np.ceil(len(cardish) * 0.78))):
+                    continue
+
+                score = (len(cardish) - match_count, average_distance)
+                if best is None or score < best[0]:
+                    best = (score, match_count, average_distance, translated)
+
+        if best is None:
+            return None
+        _score, match_count, average_distance, translated = best
+        return match_count, average_distance, translated
+
+    @staticmethod
+    def _match_layout_centers(
+        candidate_centers: List[Tuple[float, float]],
+        layout_centers: List[Tuple[float, float]],
+        tile_width: int,
+        tile_height: int,
+    ) -> Tuple[int, float]:
+        pairs = []
+        for candidate_index, (candidate_x, candidate_y) in enumerate(candidate_centers):
+            for layout_index, (layout_x, layout_y) in enumerate(layout_centers):
+                dx = abs(candidate_x - layout_x)
+                dy = abs(candidate_y - layout_y)
+                if dx > max(16.0, tile_width * 0.22) or dy > max(14.0, tile_height * 0.24):
+                    continue
+                normalized_distance = ((dx / float(max(1, tile_width))) ** 2 + (dy / float(max(1, tile_height))) ** 2) ** 0.5
+                pairs.append((normalized_distance, candidate_index, layout_index))
+
+        pairs.sort()
+        used_candidates = set()
+        used_layout = set()
+        distances = []
+        for distance, candidate_index, layout_index in pairs:
+            if candidate_index in used_candidates or layout_index in used_layout:
+                continue
+            used_candidates.add(candidate_index)
+            used_layout.add(layout_index)
+            distances.append(distance)
+
+        if not distances:
+            return 0, 999.0
+        return len(distances), float(np.mean(distances))
+
+    @staticmethod
+    def _zoom_gallery_layout_centers(
+        participant_count: int,
+        tile_width: int,
+        tile_height: int,
+        step_x: float,
+        step_y: float,
+    ) -> List[Tuple[float, float]]:
+        if participant_count <= 0:
+            return []
+
+        columns = int(np.ceil(np.sqrt(participant_count)))
+        rows = int(np.ceil(participant_count / float(columns)))
+        centers: List[Tuple[float, float]] = []
+        remaining = participant_count
+        full_row_width = tile_width + (columns - 1) * step_x
+
+        for row_index in range(rows):
+            row_count = min(columns, remaining)
+            remaining -= row_count
+            row_width = tile_width + (row_count - 1) * step_x
+            row_offset = (full_row_width - row_width) / 2.0
+            center_y = tile_height / 2.0 + row_index * step_y
+            for column_index in range(row_count):
+                center_x = row_offset + tile_width / 2.0 + column_index * step_x
+                centers.append((center_x, center_y))
+
+        return centers
+
+    def _estimate_horizontal_gallery_step(
+        self,
+        candidates: List[DetectionCandidate],
+        tile_width: int,
+        tile_height: int,
+    ) -> float | None:
+        row_centers = self._cluster_axis_values(
+            [candidate.rect[1] + candidate.rect[3] / 2.0 for candidate in candidates],
+            max(8.0, tile_height * 0.35),
+        )
+        steps = []
+        for row_center in row_centers:
+            row_items = [
+                candidate.rect[0] + candidate.rect[2] / 2.0
+                for candidate in candidates
+                if abs(candidate.rect[1] + candidate.rect[3] / 2.0 - row_center) <= max(8.0, tile_height * 0.35)
+            ]
+            row_items.sort()
+            steps.extend(self._fundamental_steps_from_axis(row_items, tile_width))
+
+        if not steps:
+            return None
+        return float(np.median(steps))
+
+    def _estimate_axis_step(self, centers: List[float], item_size: int) -> float | None:
+        clustered = self._cluster_axis_values(centers, max(6.0, item_size * 0.18))
+        steps = self._fundamental_steps_from_axis(clustered, item_size)
+        if not steps:
+            return None
+        return float(np.median(steps))
+
+    @staticmethod
+    def _layout_bbox_from_centers(
+        centers: List[Tuple[float, float]],
+        tile_width: int,
+        tile_height: int,
+    ) -> Tuple[float, float, float, float]:
+        left = min(center_x - tile_width / 2.0 for center_x, _center_y in centers)
+        top = min(center_y - tile_height / 2.0 for _center_x, center_y in centers)
+        right = max(center_x + tile_width / 2.0 for center_x, _center_y in centers)
+        bottom = max(center_y + tile_height / 2.0 for _center_x, center_y in centers)
+        return left, top, right - left, bottom - top
+
+    @staticmethod
+    def _layout_coverage_penalty(layout_bbox: Tuple[float, float, float, float], roi: Rect) -> float:
+        _x, _y, width, height = layout_bbox
+        _roi_x, _roi_y, roi_width, roi_height = roi
+        coverage_x = min(1.0, width / float(max(1, roi_width)))
+        coverage_y = min(1.0, height / float(max(1, roi_height)))
+        return (1.0 - coverage_x) + (1.0 - coverage_y)
+
+    @staticmethod
+    def _layout_center_penalty(
+        layout_bbox: Tuple[float, float, float, float],
+        roi: Rect,
+        tile_width: int,
+        tile_height: int,
+    ) -> float:
+        x, y, width, height = layout_bbox
+        roi_x, roi_y, roi_width, roi_height = roi
+        layout_center_x = x + width / 2.0
+        layout_center_y = y + height / 2.0
+        roi_center_x = roi_x + roi_width / 2.0
+        roi_center_y = roi_y + roi_height / 2.0
+        return abs(layout_center_x - roi_center_x) / float(max(1, tile_width)) + abs(layout_center_y - roi_center_y) / float(max(1, tile_height))
+
+    @staticmethod
+    def _fundamental_steps_from_axis(values: List[float], item_size: int) -> List[float]:
+        if len(values) < 2:
+            return []
+        steps = []
+        for diff in np.diff(sorted(values)):
+            if diff < item_size * 0.45:
+                continue
+            step_count = max(1, int(round(diff / float(max(1, item_size)))))
+            step = diff / float(step_count)
+            if item_size * 0.75 <= step <= item_size * 1.55:
+                steps.append(float(step))
+        return steps
+
+    @staticmethod
+    def _axis_grid_centers(centers: List[float], item_size: int) -> List[float]:
+        if not centers:
+            return []
+
+        clustered = ZoomGalleryDetector._cluster_axis_values(centers, max(6.0, item_size * 0.18))
+        if len(clustered) == 1:
+            return clustered
+
+        diffs = np.diff(clustered)
+        fundamental_steps = []
+        for diff in diffs:
+            if diff < item_size * 0.45:
+                continue
+            step_count = max(1, int(round(diff / float(max(1, item_size)))))
+            fundamental_steps.append(diff / float(step_count))
+        if not fundamental_steps:
+            return clustered
+
+        step = float(np.median(fundamental_steps))
+        if step < item_size * 0.75 or step > item_size * 1.55:
+            return clustered
+
+        first = clustered[0]
+        indexes = [int(round((center - first) / step)) for center in clustered]
+        residuals = [abs(center - (first + index * step)) for center, index in zip(clustered, indexes)]
+        if max(residuals, default=0.0) > max(14.0, item_size * 0.18):
+            return clustered
+
+        min_index = min(indexes)
+        max_index = max(indexes)
+        if max_index - min_index + 1 > 49:
+            return clustered
+        return [first + index * step for index in range(min_index, max_index + 1)]
+
+    @staticmethod
+    def _cluster_axis_values(values: List[float], tolerance: float) -> List[float]:
+        clusters: List[List[float]] = []
+        for value in sorted(values):
+            if clusters and abs(value - float(np.mean(clusters[-1]))) <= tolerance:
+                clusters[-1].append(value)
+            else:
+                clusters.append([value])
+        return [float(np.mean(cluster)) for cluster in clusters]
+
+    @staticmethod
+    def _grid_explains_candidates(cardish: List[DetectionCandidate], inferred: List[DetectionCandidate]) -> bool:
+        explained = 0
+        for candidate in cardish:
+            if any(ZoomGalleryDetector._intersection_area(candidate.rect, grid.rect) / float(max(1, ZoomGalleryDetector._rect_area(candidate.rect))) >= 0.55 for grid in inferred):
+                explained += 1
+        return explained >= max(3, int(len(cardish) * 0.75))
+
+    def _snap_texture_rect_to_badges(self, image: np.ndarray, rect: Rect, roi: Rect) -> Rect:
+        badges = self._find_zoom_name_badges(image, roi)
+        if not badges:
+            return rect
+
+        x, y, width, height = rect
+        right = x + width
+        bottom = y + height
+        horizontal_margin = max(8, width // 12)
+        vertical_margin = max(8, height // 8)
+        nearby_badges = [
+            badge
+            for badge in badges
+            if badge[0] + badge[2] >= x - horizontal_margin
+            and badge[0] <= right + horizontal_margin
+            and badge[1] >= y - vertical_margin
+            and badge[1] <= bottom + vertical_margin
+        ]
+        if not nearby_badges:
+            return rect
+
+        badge_bottom = max(badge[1] + badge[3] for badge in nearby_badges)
+        if badge_bottom > bottom:
+            bottom = badge_bottom + max(3, image.shape[0] // 240)
+
+        return x, y, width, max(1, bottom - y)
+
     @staticmethod
     def _estimate_border_color(image: np.ndarray) -> np.ndarray:
         height, width = image.shape[:2]
@@ -302,8 +1002,12 @@ class ZoomGalleryDetector:
     ) -> List[DetectionCandidate]:
         gallery_roi = self._normalize_roi(image, roi)
         badges = self._find_zoom_name_badges(image, gallery_roi)
+        compact_badges = self._compact_zoom_badges_for_layout_only(badges, gallery_roi)
+        column_candidates = self._detect_from_zoom_column_bands(image, compact_badges, content_candidates, gallery_roi)
+        if column_candidates:
+            return column_candidates
         if not content_candidates:
-            badges = self._compact_zoom_badges_for_layout_only(badges, gallery_roi)
+            badges = compact_badges
         if not badges:
             return []
 
@@ -349,6 +1053,205 @@ class ZoomGalleryDetector:
                     candidates.append(DetectionCandidate(rect, 0.96, "zoom-name-badge-layout"))
 
         return self._dedupe(candidates)
+
+    def _detect_from_zoom_column_bands(
+        self,
+        image: np.ndarray,
+        badges: List[Rect],
+        content_candidates: List[DetectionCandidate],
+        roi: Rect,
+    ) -> List[DetectionCandidate]:
+        if not badges:
+            return []
+
+        image_height, image_width = image.shape[:2]
+        roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi)
+        roi_bottom = roi_y + roi_height
+        row_groups = self._group_badges_by_row(badges, max_gap=max(10, roi_height // 40))
+
+        candidates: List[DetectionCandidate] = []
+        for row_badges in row_groups:
+            if len(row_badges) != 1:
+                continue
+
+            badge_bottom = max(badge[1] + badge[3] for badge in row_badges)
+            row_bottom = min(
+                roi_bottom,
+                badge_bottom + max(3, roi_height // 160),
+            )
+            if roi_bottom - row_bottom <= max(4, roi_height // 80):
+                row_bottom = roi_bottom
+            content_top = self._content_top_for_badge_row(row_badges, content_candidates, row_bottom, image_height)
+            band_top = self._column_band_row_top(image, row_badges, gallery_roi=(roi_x, roi_y, roi_width, roi_height), row_bottom=row_bottom)
+            if band_top is not None:
+                row_top = band_top
+            elif content_top is not None:
+                row_top = content_top
+            else:
+                row_top = max(roi_y, row_bottom - MAX_PARTICIPANT_RECT_HEIGHT)
+            row_top = max(roi_y, min(row_top, row_bottom - 1))
+            row_height = row_bottom - row_top
+            if row_height < max(80, int(roi_height * 0.35)):
+                continue
+
+            row_rects = self._column_band_rects_for_row(image, (roi_x, row_top, roi_width, row_height), roi, row_badges)
+            if len(row_rects) < 2:
+                continue
+            if not any(self._badge_center_inside_any_rect(badge, row_rects) for badge in row_badges):
+                continue
+
+            for rect in self._landscape_rects_from_column_bands(row_rects, row_bottom, roi):
+                if self._is_valid_rect(rect, image_width, image_height) and self._rect_inside_roi(rect, roi):
+                    candidates.append(DetectionCandidate(rect, 0.95, "zoom-column-layout"))
+
+        return self._dedupe(candidates)
+
+    def _landscape_rects_from_column_bands(self, band_rects: List[Rect], row_bottom: int, roi: Rect) -> List[Rect]:
+        roi_x, roi_y, roi_width, roi_height = roi
+        roi_bottom = roi_y + roi_height
+        reference_width = int(round(float(np.median([rect[2] for rect in band_rects]))))
+        reference_height = max(1, int(round(reference_width * 9.0 / 16.0)))
+        rects: List[Rect] = []
+
+        for band_x, _band_y, band_width, band_height in band_rects:
+            tile_width = max(1, band_width)
+            tile_height = max(1, min(band_height, reference_height))
+            tile_x = max(roi_x, min(band_x, roi_x + roi_width - tile_width))
+            tile_bottom = max(roi_y + tile_height, min(row_bottom, roi_bottom))
+            tile_y = max(roi_y, min(tile_bottom - tile_height, roi_bottom - tile_height))
+            rects.append((int(tile_x), int(tile_y), int(tile_width), int(tile_height)))
+
+        return rects
+
+    def _column_band_row_top(self, image: np.ndarray, row_badges: List[Rect], gallery_roi: Rect, row_bottom: int) -> int | None:
+        roi_x, roi_y, roi_width, _roi_height = self._normalize_roi(image, gallery_roi)
+        search_height = max(1, row_bottom - roi_y)
+        search = image[roi_y:row_bottom, roi_x : roi_x + roi_width]
+        if search.size == 0 or search_height < 2:
+            return None
+
+        gray = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
+        kernel_width = max(3, roi_width // 180)
+        if kernel_width % 2 == 0:
+            kernel_width += 1
+        smooth = cv2.GaussianBlur(gray, (kernel_width, 1), 0).astype(np.float32)
+        gradient = np.abs(np.diff(smooth, axis=1))
+        if gradient.size == 0:
+            return None
+
+        top_k = max(1, min(max(4, roi_width // 96), gradient.shape[1]))
+        row_energy = np.partition(gradient, -top_k, axis=1)[:, -top_k:].mean(axis=1)
+        vertical_kernel = max(3, search_height // 80)
+        if vertical_kernel % 2 == 0:
+            vertical_kernel += 1
+        row_energy = cv2.GaussianBlur(row_energy.reshape(-1, 1), (1, vertical_kernel), 0).reshape(-1)
+
+        baseline = float(np.percentile(row_energy, 20))
+        peak = float(np.percentile(row_energy, 95))
+        if peak < 0.9 or peak - baseline < 0.45:
+            return None
+
+        threshold = max(0.75, baseline + (peak - baseline) * 0.35)
+        runs = self._merge_close_segments(self._runs(row_energy >= threshold), max(3, search_height // 90))
+        if not runs:
+            return None
+
+        badge_top = min(badge[1] for badge in row_badges) - roi_y
+        target_bottom = max(0, row_bottom - roi_y - max(8, search_height // 30))
+        valid_runs = [
+            (start, end)
+            for start, end in runs
+            if end >= target_bottom and start <= badge_top and end - start >= max(40, search_height // 5)
+        ]
+        if not valid_runs:
+            return None
+
+        start, _end = min(valid_runs, key=lambda run: run[0])
+        return roi_y + start
+
+    def _column_band_rects_for_row(
+        self,
+        image: np.ndarray,
+        row_rect: Rect,
+        roi: Rect,
+        row_badges: List[Rect] | None = None,
+    ) -> List[Rect]:
+        roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi)
+        row_x, row_y, row_width, row_height = row_rect
+        sample_top = row_y + max(1, int(row_height * 0.04))
+        sample_bottom = row_y + row_height - max(8, int(row_height * 0.13))
+        if sample_bottom <= sample_top + max(20, row_height // 4):
+            sample_top = row_y
+            sample_bottom = row_y + row_height
+
+        sample = image[sample_top:sample_bottom, row_x : row_x + row_width]
+        if sample.size == 0:
+            return []
+
+        gray = cv2.cvtColor(sample, cv2.COLOR_BGR2GRAY)
+        kernel_width = max(3, row_width // 160)
+        if kernel_width % 2 == 0:
+            kernel_width += 1
+        smooth_image = cv2.GaussianBlur(gray, (kernel_width, 1), 0).astype(np.float32)
+        gradient_image = np.abs(np.diff(smooth_image, axis=1))
+        if gradient_image.size == 0:
+            return []
+
+        low_contrast_floor = max(0.8, min(3.0, float(np.percentile(gradient_image, 90)) * 0.45))
+        edge_presence = np.mean(gradient_image >= low_contrast_floor, axis=0)
+        edge_strength = np.mean(gradient_image, axis=0) * np.sqrt(np.maximum(edge_presence, 0.0))
+        if edge_strength.size < 2:
+            return []
+
+        kernel_width = max(3, row_width // 180)
+        if kernel_width % 2 == 0:
+            kernel_width += 1
+        edge_strength = cv2.GaussianBlur(edge_strength.reshape(1, -1), (kernel_width, 1), 0).reshape(-1)
+
+        threshold = max(
+            0.75,
+            float(np.percentile(edge_strength, 96)) * 0.55,
+            float(np.mean(edge_strength) + np.std(edge_strength) * 1.20),
+        )
+        edge_indexes = np.where((edge_strength >= threshold) & (edge_presence >= 0.38))[0] + 1
+        if edge_indexes.size < 2:
+            return []
+
+        max_edge_gap = max(2, row_width // 240)
+        edge_runs = self._merge_close_segments([(int(index), int(index) + 1) for index in edge_indexes], max_edge_gap)
+        edges = [row_x + int((start + end - 1) // 2) for start, end in edge_runs]
+        edge_positions = set(edges)
+        boundaries = sorted({roi_x, roi_x + roi_width, *edges})
+
+        rects: List[Rect] = []
+        min_width = max(48, int(image.shape[1] * 0.045))
+        for left, right in zip(boundaries, boundaries[1:]):
+            width = right - left
+            if width < min_width:
+                continue
+            rect = (left, row_y, width, row_height)
+            aspect = width / float(max(1, row_height))
+            if aspect > 1.08:
+                continue
+            if not (left in edge_positions and right in edge_positions):
+                if not row_badges or not self._any_badge_center_inside_rect(row_badges, rect):
+                    continue
+            rects.append(rect)
+
+        return rects
+
+    @staticmethod
+    def _badge_center_inside_any_rect(badge: Rect, rects: List[Rect]) -> bool:
+        return any(ZoomGalleryDetector._rect_contains_point(rect, badge[0] + badge[2] / 2.0, badge[1] + badge[3] / 2.0) for rect in rects)
+
+    @staticmethod
+    def _any_badge_center_inside_rect(badges: List[Rect], rect: Rect) -> bool:
+        return any(ZoomGalleryDetector._rect_contains_point(rect, badge[0] + badge[2] / 2.0, badge[1] + badge[3] / 2.0) for badge in badges)
+
+    @staticmethod
+    def _rect_contains_point(rect: Rect, x: float, y: float) -> bool:
+        rect_x, rect_y, width, height = rect
+        return rect_x <= x <= rect_x + width and rect_y <= y <= rect_y + height
 
     @staticmethod
     def _compact_zoom_badges_for_layout_only(badges: List[Rect], roi: Rect) -> List[Rect]:
@@ -644,6 +1547,14 @@ class ZoomGalleryDetector:
         y = int(round(center_y - height / 2.0))
         x = max(roi_x, min(x, roi_x + roi_width - width))
         y = max(roi_y, min(y, roi_y + roi_height - height))
+        return x, y, width, height
+
+    @staticmethod
+    def _rect_from_center(center_x: float, center_y: float, width: int, height: int) -> Rect:
+        width = max(1, int(width))
+        height = max(1, int(height))
+        x = int(round(center_x - width / 2.0))
+        y = int(round(center_y - height / 2.0))
         return x, y, width, height
 
     def _clamp_rect_to_participant_bounds(self, rect: Rect, roi: Rect) -> Rect:
@@ -1009,6 +1920,11 @@ class ZoomGalleryDetector:
         aspect_ratio = width / float(height)
         return self.min_aspect_ratio <= aspect_ratio <= self.max_aspect_ratio
 
+    @staticmethod
+    def _is_landscape_rect(rect: Rect) -> bool:
+        _x, _y, width, height = rect
+        return height > 0 and width / float(height) >= MIN_LANDSCAPE_PARTICIPANT_ASPECT
+
     def _dedupe(self, candidates: List[DetectionCandidate]) -> List[DetectionCandidate]:
         candidates = sorted(candidates, key=lambda item: item.score, reverse=True)
         keep: List[DetectionCandidate] = []
@@ -1100,6 +2016,57 @@ class ZoomGalleryDetector:
                     break
 
         return [candidate for index, candidate in enumerate(candidates) if index not in remove_indexes]
+
+    def _remove_excessive_tile_overlaps(self, candidates: List[DetectionCandidate]) -> List[DetectionCandidate]:
+        if len(candidates) <= 1:
+            return candidates
+
+        ordered = sorted(candidates, key=self._overlap_candidate_sort_key, reverse=True)
+        keep: List[DetectionCandidate] = []
+        for candidate in ordered:
+            if any(not self._has_acceptable_tile_overlap(candidate.rect, kept.rect) for kept in keep):
+                continue
+            keep.append(candidate)
+
+        return sorted(keep, key=lambda item: (item.rect[1], item.rect[0]))
+
+    @staticmethod
+    def _overlap_candidate_sort_key(candidate: DetectionCandidate) -> Tuple[float, float, int]:
+        reason_priority = {
+            "zoom-neon-border": 6.0,
+            "gallery-rectangle": 5.2,
+            "gallery-rectangle-split": 5.1,
+            "zoom-column-layout": 4.8,
+            "zoom-name-badge-layout": 4.6,
+            "open-camera-texture": 4.4,
+            "gallery-grid-inferred": 4.0,
+            "center-name-layout": 3.6,
+            "greenish-light-base-rectangle": 2.5,
+            "probable-base-rectangle": 2.0,
+            "fragment-union": 1.4,
+            "edge": 1.2,
+            "projection": 1.0,
+        }.get(candidate.reason, 0.0)
+        return reason_priority, candidate.score, ZoomGalleryDetector._rect_area(candidate.rect)
+
+    @staticmethod
+    def _has_acceptable_tile_overlap(a: Rect, b: Rect) -> bool:
+        ax, ay, aw, ah = a
+        bx, by, bw, bh = b
+        overlap_width = max(0, min(ax + aw, bx + bw) - max(ax, bx))
+        overlap_height = max(0, min(ay + ah, by + bh) - max(ay, by))
+        if overlap_width <= 0 or overlap_height <= 0:
+            return True
+
+        overlap_area = overlap_width * overlap_height
+        smaller_area = min(ZoomGalleryDetector._rect_area(a), ZoomGalleryDetector._rect_area(b))
+        overlap_ratio = overlap_area / float(max(1, smaller_area))
+        if overlap_ratio <= MAX_ACCEPTABLE_TILE_OVERLAP_RATIO:
+            return True
+
+        thin_x = overlap_width <= max(3, int(round(min(aw, bw) * 0.025)))
+        thin_y = overlap_height <= max(3, int(round(min(ah, bh) * 0.025)))
+        return (thin_x or thin_y) and overlap_ratio <= MAX_ACCEPTABLE_EDGE_OVERLAP_RATIO
 
     def _filter_inconsistent_tile_sizes(self, candidates: List[DetectionCandidate]) -> List[DetectionCandidate]:
         if len(candidates) <= 1:

@@ -3,7 +3,7 @@ from setuptools import setup
 
 setup(
     name="merge-zoom-manager",
-    version="1.7.0",
+    version="1.8.1",
     py_modules=[
         "CaptureProcessor",
         "WindowCaptureConfiguration",
@@ -11,6 +11,7 @@ setup(
         "WindowRendererGroupPreview",
         "WindowRendererPreview",
         "captureRunnerOnThread",
+        "demo_live_zoom_sessions",
         "image_utils",
         "main",
         "models",
