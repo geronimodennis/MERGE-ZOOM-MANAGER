@@ -3,21 +3,23 @@ from threading import Lock
 import numpy as np
 
 from image_utils import blank_image, draw_debug_overlay
-from models import Rect
+from models import ParticipantTile, Rect
 from participant_detection import ZoomGalleryDetector
 from participant_tracking import ParticipantTracker
 
 
 class CaptureProcessor:
-    def __init__(self, captureConfigurationList: list, chromaKey=(0, 177, 64)):
+    def __init__(self, captureConfigurationList: list, chromaKey=(0, 177, 64), detection_interval: int = 3):
         self._captureConfigurationList = captureConfigurationList
         self._chromaKey = chromaKey or (0, 177, 64)
+        self.detection_interval = max(1, int(detection_interval))
         self.detector = ZoomGalleryDetector()
         self.tracker = ParticipantTracker()
         self.last_tiles = []
         self.last_screenshots = {}
         self.last_rois = {}
         self.frame_index = 0
+        self._last_full_detection = {}
         self._lock = Lock()
 
     def processScreenShot(self, useSmallerCapture=False):
@@ -43,7 +45,15 @@ class CaptureProcessor:
             screenshots[source_key] = screenshot
             roi = self._roi_for_config(config, screenshot)
             rois[source_key] = roi
-            tiles = self.detector.detect(screenshot, source_key=source_key, frame_index=self.frame_index, roi=roi)
+            if self._should_run_full_detection(source_key, screenshot, roi):
+                tiles = self.detector.detect(screenshot, source_key=source_key, frame_index=self.frame_index, roi=roi)
+                self._last_full_detection[source_key] = {
+                    "frame_index": self.frame_index,
+                    "roi": roi,
+                    "shape": screenshot.shape[:2],
+                }
+            else:
+                tiles = self._tiles_from_previous_rects(source_key, screenshot)
             detections.extend(tiles)
 
         with self._lock:
@@ -78,14 +88,13 @@ class CaptureProcessor:
             image = self.last_screenshots.get(source_key)
             if image is None:
                 return None
-            image = image.copy()
             tiles = [tile for tile in self.last_tiles if tile.source_key == source_key]
             roi = self.last_rois.get(source_key) or self.detector._gallery_search_roi(image)
         return draw_debug_overlay(image, tiles, title=f"source {source_key}", roi=roi)
 
     def build_live_debug_overlay(self):
         with self._lock:
-            screenshots = [(source_key, image.copy()) for source_key, image in self.last_screenshots.items()]
+            screenshots = list(self.last_screenshots.items())
             tiles = list(self.last_tiles)
             rois = dict(self.last_rois)
 
@@ -166,6 +175,7 @@ class CaptureProcessor:
             self.last_tiles = []
             self.last_screenshots = {}
             self.last_rois = {}
+            self._last_full_detection = {}
 
         for config in self._captureConfigurationList:
             capture_handler = config.get("captureHandler")
@@ -203,6 +213,62 @@ class CaptureProcessor:
         if manual_roi is not None:
             return self.detector._normalize_roi(image, manual_roi)
         return self.detector._gallery_search_roi(image)
+
+    def _should_run_full_detection(self, source_key: str, image: np.ndarray, roi: Rect) -> bool:
+        previous_tiles = self._previous_tiles_for_source(source_key)
+        if not previous_tiles:
+            return True
+
+        state = self._last_full_detection.get(source_key)
+        if state is None:
+            return True
+        if state.get("roi") != roi:
+            return True
+        if state.get("shape") != image.shape[:2]:
+            return True
+        return self.frame_index - int(state.get("frame_index", 0)) >= self.detection_interval
+
+    def _tiles_from_previous_rects(self, source_key: str, image: np.ndarray):
+        height, width = image.shape[:2]
+        tiles = []
+        for previous in self._previous_tiles_for_source(source_key):
+            rect = self._clamp_rect_to_image(previous.rect, width, height)
+            if rect is None:
+                continue
+
+            x, y, tile_width, tile_height = rect
+            crop = image[y : y + tile_height, x : x + tile_width].copy()
+            if crop.size == 0:
+                continue
+
+            tiles.append(
+                ParticipantTile(
+                    track_id=previous.track_id,
+                    source_key=previous.source_key,
+                    rect=rect,
+                    crop=crop,
+                    confidence=previous.confidence,
+                    descriptor=self.detector.build_descriptor(crop),
+                    frame_index=self.frame_index,
+                    debug_reason=previous.debug_reason,
+                )
+            )
+        return tiles
+
+    def _previous_tiles_for_source(self, source_key: str):
+        with self._lock:
+            return [tile for tile in self.last_tiles if tile.source_key == source_key and tile.missing_frames == 0]
+
+    @staticmethod
+    def _clamp_rect_to_image(rect: Rect, image_width: int, image_height: int):
+        x, y, width, height = rect
+        x = max(0, min(int(x), max(0, image_width - 1)))
+        y = max(0, min(int(y), max(0, image_height - 1)))
+        width = max(1, min(int(width), image_width - x))
+        height = max(1, min(int(height), image_height - y))
+        if width <= 0 or height <= 0:
+            return None
+        return x, y, width, height
 
     def _config_for_source_key(self, source_key: str):
         for config in self._captureConfigurationList:

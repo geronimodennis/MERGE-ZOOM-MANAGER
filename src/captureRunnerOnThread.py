@@ -252,7 +252,7 @@ class CaptureRunnerOnThread:
     def get_live_debug_overlay(self):
         with self._lock:
             if self._debug_frame is not None:
-                return self._debug_frame.copy(), list(self._debug_cells)
+                return self._debug_frame, list(self._debug_cells)
         return self._refresh_debug_overlay()
 
     def get_roi_edit_snapshot(self, preferred_source_key=None):
@@ -275,7 +275,7 @@ class CaptureRunnerOnThread:
     def get_snapshot(self) -> CaptureSnapshot:
         with self._lock:
             return CaptureSnapshot(
-                frame=self._frame.copy() if self._frame is not None else None,
+                frame=self._frame,
                 tiles=list(self._imageTileInfo[3]),
                 cells=list(self._composite_cells),
                 imageListInfo=[
@@ -286,7 +286,7 @@ class CaptureRunnerOnThread:
                 ],
                 capture_fps=self._capture_fps,
                 missing_pins=self._missing_pins,
-                debug_frame=self._debug_frame.copy() if self._debug_frame is not None else None,
+                debug_frame=self._debug_frame,
                 debug_cells=list(self._debug_cells),
             )
 
@@ -368,7 +368,7 @@ class CaptureRunnerOnThread:
             self._debug_frame = debug_frame
             self._debug_cells = list(debug_cells)
             if debug_frame is not None:
-                return debug_frame.copy(), list(debug_cells)
+                return debug_frame, list(debug_cells)
         return None, []
 
     def _refresh_group_frame(self):

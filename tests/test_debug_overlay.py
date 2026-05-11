@@ -110,6 +110,49 @@ def test_capture_processor_applies_manual_roi_to_detection_and_overlay():
     assert overlay is not None
 
 
+def test_capture_processor_reuses_previous_rects_between_full_detection_frames():
+    first = np.zeros((160, 240, 3), dtype=np.uint8)
+    second = first.copy()
+    third = first.copy()
+    first[30:90, 40:140] = (10, 40, 180)
+    second[30:90, 40:140] = (30, 160, 40)
+    third[30:90, 40:140] = (180, 40, 10)
+
+    handler = FakeCaptureHandler(first)
+    config = {"winName": "zoom", "captureHandler": handler, "manualRoi": (0, 0, 240, 160)}
+    processor = CaptureProcessor([config], chromaKey=(0, 177, 64), detection_interval=3)
+    calls = {"detect": 0}
+
+    def fake_detect(image, source_key="", frame_index=0, roi=None):
+        calls["detect"] += 1
+        rect = (40, 30, 100, 60)
+        x, y, width, height = rect
+        return [
+            ParticipantTile(
+                track_id=None,
+                source_key=source_key,
+                rect=rect,
+                crop=image[y : y + height, x : x + width].copy(),
+                frame_index=frame_index,
+                debug_reason="fake-full-detect",
+            )
+        ]
+
+    processor.detector.detect = fake_detect
+
+    first_tiles = processor.process_tiles()
+    handler.image = second
+    second_tiles = processor.process_tiles()
+    handler.image = third
+    processor.process_tiles()
+    processor.process_tiles()
+
+    assert calls["detect"] == 2
+    assert second_tiles[0].track_id == first_tiles[0].track_id
+    assert tuple(int(value) for value in second_tiles[0].crop[0, 0]) == (30, 160, 40)
+    assert second_tiles[0].debug_reason == "fake-full-detect"
+
+
 def test_capture_processor_close_releases_capture_handlers_and_cached_frames():
     image = np.zeros((120, 200, 3), dtype=np.uint8)
     handler = FakeCaptureHandler(image)

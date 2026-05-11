@@ -76,7 +76,7 @@ class WindowsGraphicsCaptureBackend:
 
             @capture.event
             def on_frame_arrived(frame, _capture_control):
-                image = np.ascontiguousarray(frame.frame_buffer[:, :, :3]).copy()
+                image = np.ascontiguousarray(frame.frame_buffer[:, :, :3])
                 with self._lock:
                     self._frame = image
                 self._first_frame.set()
@@ -103,7 +103,7 @@ class WindowsGraphicsCaptureBackend:
         with self._lock:
             if self._frame is None:
                 return None
-            return self._frame.copy()
+            return self._frame
 
     def stop(self) -> None:
         try:

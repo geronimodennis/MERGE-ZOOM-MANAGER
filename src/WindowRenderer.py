@@ -8,6 +8,7 @@ from WindowRendererGroupPreview import WindowRendererGroupPreview
 from WindowRendererPreview import WindowRendererPreview
 from captureRunnerOnThread import CaptureRunnerOnThread
 from image_utils import aspect_fit_rect, cv_to_photo_image, find_cell_at
+from performance import UI_FRAME_INTERVAL_MS
 
 
 class WindowRenderer:
@@ -110,7 +111,7 @@ class WindowRenderer:
         self.initializeObject(self.parent, self.background, self.captureConfiguration)
         if not self.isRendering:
             self.isRendering = True
-            self.window.after(16, self.__runCapture)
+            self.window.after(UI_FRAME_INTERVAL_MS, self.__runCapture)
 
     def __runCapture(self):
         if not self.isRendering or self.window is None or not self.window.winfo_exists():
@@ -155,7 +156,7 @@ class WindowRenderer:
                 text="No participant tiles detected. Check the selected Zoom window and Gallery View.",
             )
 
-        self.window.after(16, self.__runCapture)
+        self.window.after(UI_FRAME_INTERVAL_MS, self.__runCapture)
 
     def backgroundColorToStr(self):
         return "#%02x%02x%02x" % self.background

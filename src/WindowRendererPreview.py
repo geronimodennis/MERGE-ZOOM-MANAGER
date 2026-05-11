@@ -1,6 +1,7 @@
 import tkinter as TK
 
 from image_utils import aspect_fit_rect, blank_image, cv_to_photo_image
+from performance import UI_FRAME_INTERVAL_MS
 
 
 class WindowRendererPreview:
@@ -53,7 +54,7 @@ class WindowRendererPreview:
         self._create_window()
         if not self.isRendering:
             self.isRendering = True
-            self.window.after(16, self.__runCapture)
+            self.window.after(UI_FRAME_INTERVAL_MS, self.__runCapture)
 
     def __runCapture(self):
         if not self.isRendering or not self.exists():
@@ -78,7 +79,7 @@ class WindowRendererPreview:
         self.window.canvas.itemconfig(self.window.canvasImageConfigId, image=self.currentImage)
         self.window.canvas.itemconfig(self.window.canvasTextConfigId, text=message)
 
-        self.window.after(16, self.__runCapture)
+        self.window.after(UI_FRAME_INTERVAL_MS, self.__runCapture)
 
     def close(self):
         self.isRendering = False
@@ -87,4 +88,3 @@ class WindowRendererPreview:
 
     def backgroundColorToStr(self):
         return "#%02x%02x%02x" % self.background
-

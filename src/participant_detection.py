@@ -13,6 +13,7 @@ MAX_PARTICIPANT_RECT_WIDTH = 945
 MAX_PARTICIPANT_RECT_HEIGHT = 535
 PROBABLE_PARTICIPANT_RECT_WIDTH = 945
 PROBABLE_PARTICIPANT_RECT_HEIGHT = 535
+DETECTION_SCAN_MAX_WIDTH = 960
 STABLE_TILE_REASONS = {
     "gallery-rectangle",
     "gallery-rectangle-split",
@@ -118,12 +119,13 @@ class ZoomGalleryDetector:
 
     def _detect_from_projection(self, image: np.ndarray, roi: Rect | None = None) -> List[DetectionCandidate]:
         roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi)
-        search_image = image[roi_y : roi_y + roi_height, roi_x : roi_x + roi_width]
+        search_image, scan_scale = self._scaled_search_image(image, (roi_x, roi_y, roi_width, roi_height))
         if search_image.size == 0:
             return []
 
         mask = self._foreground_mask(search_image)
-        image_height, image_width = mask.shape[:2]
+        scan_height, scan_width = mask.shape[:2]
+        image_height, image_width = image.shape[:2]
         x_segments = self._segments_from_projection(mask, axis=0)
         y_segments = self._segments_from_projection(mask, axis=1)
 
@@ -133,28 +135,31 @@ class ZoomGalleryDetector:
                 width = x2 - x1
                 height = y2 - y1
                 rect = (x1, y1, width, height)
-                if not self._is_valid_rect(rect, image_width, image_height):
+                if not self._is_valid_rect(rect, scan_width, scan_height):
                     continue
 
                 density = float(np.count_nonzero(mask[y1:y2, x1:x2])) / max(1, width * height)
                 if density < 0.04:
                     continue
-                absolute_rect = (x1 + roi_x, y1 + roi_y, width, height)
+                absolute_rect = self._absolute_rect_from_scan(rect, roi_x, roi_y, scan_scale)
+                if not self._is_valid_rect(absolute_rect, image_width, image_height):
+                    continue
                 candidates.append(DetectionCandidate(absolute_rect, min(0.99, 0.55 + density), "projection"))
         return candidates
 
     def _detect_from_edges(self, image: np.ndarray, roi: Rect | None = None) -> List[DetectionCandidate]:
         roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi)
-        search_image = image[roi_y : roi_y + roi_height, roi_x : roi_x + roi_width]
+        search_image, scan_scale = self._scaled_search_image(image, (roi_x, roi_y, roi_width, roi_height))
         if search_image.size == 0:
             return []
 
-        image_height, image_width = search_image.shape[:2]
+        scan_height, scan_width = search_image.shape[:2]
+        image_height, image_width = image.shape[:2]
         gray = cv2.cvtColor(search_image, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
         edges = cv2.Canny(gray, 45, 140)
 
-        kernel_size = max(3, min(image_width, image_height) // 180)
+        kernel_size = max(3, min(scan_width, scan_height) // 180)
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
         edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
 
@@ -163,26 +168,29 @@ class ZoomGalleryDetector:
         for contour in contours:
             x, y, width, height = cv2.boundingRect(contour)
             rect = (x, y, width, height)
-            if not self._is_valid_rect(rect, image_width, image_height):
+            if not self._is_valid_rect(rect, scan_width, scan_height):
                 continue
-            area_ratio = (width * height) / float(image_width * image_height)
-            absolute_rect = (x + roi_x, y + roi_y, width, height)
+            area_ratio = (width * height) / float(scan_width * scan_height)
+            absolute_rect = self._absolute_rect_from_scan(rect, roi_x, roi_y, scan_scale)
+            if not self._is_valid_rect(absolute_rect, image_width, image_height):
+                continue
             candidates.append(DetectionCandidate(absolute_rect, min(0.9, 0.45 + area_ratio), "edge"))
         return candidates
 
     def _detect_from_gallery_rectangles(self, image: np.ndarray, roi_rect: Rect | None = None) -> List[DetectionCandidate]:
         image_height, image_width = image.shape[:2]
         roi_x, roi_y, roi_width, roi_height = self._normalize_roi(image, roi_rect)
-        roi = image[roi_y : roi_y + roi_height, roi_x : roi_x + roi_width]
+        roi, scan_scale = self._scaled_search_image(image, (roi_x, roi_y, roi_width, roi_height))
         if roi.size == 0:
             return []
 
+        scan_height, scan_width = roi.shape[:2]
         background = self._estimate_border_color(roi)
         diff = np.max(np.abs(roi.astype(np.int16) - background.astype(np.int16)), axis=2)
         mask = (diff > 8).astype(np.uint8) * 255
 
-        kernel_width = max(9, roi_width // 120)
-        kernel_height = max(5, roi_height // 120)
+        kernel_width = max(9, scan_width // 120)
+        kernel_height = max(5, scan_height // 120)
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_width, kernel_height))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
@@ -196,7 +204,7 @@ class ZoomGalleryDetector:
             if fill_ratio < 0.28:
                 continue
 
-            absolute_rect = (x + roi_x, y + roi_y, width, height)
+            absolute_rect = self._absolute_rect_from_scan((x, y, width, height), roi_x, roi_y, scan_scale)
             candidates.extend(self._candidate_rects_from_gallery_rect(absolute_rect, image_width, image_height))
 
         candidates = self._dedupe(candidates)
@@ -743,6 +751,35 @@ class ZoomGalleryDetector:
         if not tops:
             return None
         return int(min(tops))
+
+    @staticmethod
+    def _scaled_search_image(
+        image: np.ndarray,
+        roi: Rect,
+        max_width: int = DETECTION_SCAN_MAX_WIDTH,
+    ) -> Tuple[np.ndarray, float]:
+        roi_x, roi_y, roi_width, roi_height = roi
+        search_image = image[roi_y : roi_y + roi_height, roi_x : roi_x + roi_width]
+        if search_image.size == 0:
+            return search_image, 1.0
+
+        scale = min(1.0, max(1, int(max_width)) / float(max(1, roi_width)))
+        if scale >= 1.0:
+            return search_image, 1.0
+
+        scan_width = max(1, int(round(roi_width * scale)))
+        scan_height = max(1, int(round(roi_height * scale)))
+        return cv2.resize(search_image, (scan_width, scan_height), interpolation=cv2.INTER_AREA), scale
+
+    @staticmethod
+    def _absolute_rect_from_scan(rect: Rect, roi_x: int, roi_y: int, scan_scale: float) -> Rect:
+        x, y, width, height = rect
+        if scan_scale < 1.0:
+            x = int(round(x / scan_scale))
+            y = int(round(y / scan_scale))
+            width = int(round(width / scan_scale))
+            height = int(round(height / scan_scale))
+        return x + roi_x, y + roi_y, max(1, width), max(1, height)
 
     @staticmethod
     def _normalize_roi(image: np.ndarray, roi: Rect | None) -> Rect:

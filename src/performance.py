@@ -3,6 +3,7 @@ from time import perf_counter, sleep
 
 
 LOGGER_NAME = "merge_zoom_manager"
+UI_FRAME_INTERVAL_MS = 33
 
 
 def get_logger(name: str = LOGGER_NAME) -> logging.Logger:
