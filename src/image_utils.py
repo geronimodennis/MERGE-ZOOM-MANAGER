@@ -151,9 +151,10 @@ def draw_debug_overlay(
     if roi is not None:
         roi_x, roi_y, roi_width, roi_height = roi
         cv2.rectangle(overlay, (roi_x, roi_y), (roi_x + roi_width, roi_y + roi_height), (255, 170, 40), 2)
+        roi_label = f"gallery roi y={roi_y} h={roi_height}"
         cv2.putText(
             overlay,
-            "gallery roi",
+            roi_label,
             (roi_x + 6, max(18, roi_y + 18)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,

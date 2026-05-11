@@ -239,6 +239,39 @@ def test_detector_excludes_zoom_top_and_bottom_menu_bars():
     assert all(tile.y + tile.height <= bottom_menu_y + 10 for tile in tiles)
 
 
+def test_gallery_roi_follows_variable_zoom_menu_heights():
+    for top_menu_h, bottom_menu_h in ((58, 86), (132, 138)):
+        image = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        image[:, :] = (17, 20, 22)
+
+        bottom_menu_y = image.shape[0] - bottom_menu_h
+        image[:top_menu_h, :] = (17, 20, 22)
+        image[bottom_menu_y:, :] = (17, 20, 22)
+        cv2.putText(image, "Zoom Meeting", (26, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (235, 235, 235), 2)
+        cv2.putText(image, "View", (1810, max(35, top_menu_h - 28)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (235, 235, 235), 2)
+        for x in range(440, 1520, 180):
+            cv2.circle(image, (x, bottom_menu_y + bottom_menu_h // 2), 18, (235, 235, 235), 2)
+
+        card_y = top_menu_h + 24
+        card_bottom = bottom_menu_y - 28
+        card_h = card_bottom - card_y
+        card_w = 880
+        first_x = 80
+        second_x = 960
+        image[card_y:card_bottom, first_x : first_x + card_w] = (34, 34, 34)
+        image[card_y:card_bottom, second_x : second_x + card_w] = (34, 34, 34)
+        cv2.circle(image, (first_x + 440, card_y + card_h // 2), 110, (85, 128, 180), -1)
+        cv2.circle(image, (second_x + 440, card_y + card_h // 2), 110, (90, 145, 115), -1)
+
+        roi = ZoomGalleryDetector._gallery_search_roi(image)
+        roi_bottom = roi[1] + roi[3]
+
+        assert top_menu_h <= roi[1] <= card_y
+        assert bottom_menu_y >= roi_bottom >= card_bottom
+        assert card_y - roi[1] <= 24
+        assert roi_bottom - card_bottom <= 24
+
+
 def test_tracker_keeps_ids_when_gallery_layout_changes():
     detector = ZoomGalleryDetector()
     tracker = ParticipantTracker()

@@ -235,48 +235,36 @@ class ZoomGalleryDetector:
     @staticmethod
     def _gallery_search_roi(image: np.ndarray) -> Rect:
         height, width = image.shape[:2]
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        content_start = int(height * 0.18)
-        content_end = max(content_start + 1, int(height * 0.82))
-        content_median = float(np.median(gray[content_start:content_end, :]))
-        tolerance = 10.0
+        chrome_top, chrome_bottom = ZoomGalleryDetector._chrome_activity_bounds(image)
+        surface_bounds = ZoomGalleryDetector._gallery_surface_bounds(image, chrome_top, chrome_bottom)
 
-        top = 0
-        top_limit = min(int(height * 0.20), 190)
-        for y in range(0, top_limit):
-            band = gray[y : min(height, y + 8), :]
-            if band.size and abs(float(np.median(band)) - content_median) <= tolerance:
-                top = max(0, y - 2)
-                break
+        if surface_bounds is not None:
+            surface_top, surface_bottom = surface_bounds
+            surface_padding = max(8, min(18, int(height * 0.018)))
+            top = max(chrome_top, surface_top - surface_padding)
+            bottom = min(chrome_bottom, surface_bottom + surface_padding)
+        else:
+            top = chrome_top
+            bottom = chrome_bottom
 
-        bottom = height
-        bottom_limit = max(0, height - min(int(height * 0.22), 240))
-        for y in range(height - 1, bottom_limit, -1):
-            band = gray[max(0, y - 8) : y + 1, :]
-            if band.size and abs(float(np.median(band)) - content_median) <= tolerance:
-                bottom = min(height, y + 2)
-                break
-
-        if bottom - top < height * 0.35:
+        if bottom - top < height * 0.30:
+            top = chrome_top
+            bottom = chrome_bottom
+        if bottom - top < height * 0.30:
             top = int(height * 0.07)
             bottom = int(height * 0.92)
 
-        activity_top, activity_bottom = ZoomGalleryDetector._chrome_activity_bounds(image)
-        top = max(top, activity_top)
-        bottom = min(bottom, activity_bottom)
-
-        if bottom - top < height * 0.35:
-            top = int(height * 0.07)
-            bottom = int(height * 0.92)
-
-        return 0, top, width, max(1, bottom - top)
+        top = max(0, min(top, height - 1))
+        bottom = max(top + 1, min(bottom, height))
+        return 0, top, width, bottom - top
 
     @staticmethod
     def _chrome_activity_bounds(image: np.ndarray) -> Tuple[int, int]:
         height = image.shape[0]
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         bright_pixels = gray > 145
-        row_activity = np.mean(bright_pixels, axis=1)
+        edges = cv2.Canny(gray, 45, 135) > 0
+        row_activity = np.mean(bright_pixels, axis=1) + np.mean(edges, axis=1) * 0.35
 
         window = max(5, height // 180)
         if window % 2 == 0:
@@ -285,8 +273,8 @@ class ZoomGalleryDetector:
         smooth = np.convolve(row_activity, kernel, mode="same")
         threshold = max(0.003, min(0.035, float(np.percentile(smooth, 97)) * 0.35))
 
-        top_limit = min(int(height * 0.18), 190)
-        bottom_limit = max(0, height - min(int(height * 0.20), 230))
+        top_limit = min(int(height * 0.28), 320)
+        bottom_limit = max(0, height - min(int(height * 0.28), 340))
         edge_zone = max(18, int(height * 0.035))
         quiet_run = max(18, int(height * 0.025))
         padding = max(6, int(height * 0.008))
@@ -295,16 +283,59 @@ class ZoomGalleryDetector:
         top_active = smooth[:top_limit] > threshold
         if top_active.size and bool(np.any(top_active[:edge_zone])):
             top = ZoomGalleryDetector._activity_boundary_from_top(top_active, quiet_run, padding)
-            top = max(top, min(top_limit, int(height * 0.085)))
 
         bottom = height
         bottom_active = smooth[bottom_limit:] > threshold
         if bottom_active.size and bool(np.any(bottom_active[-edge_zone:])):
             local_bottom = ZoomGalleryDetector._activity_boundary_from_bottom(bottom_active, quiet_run, padding)
             bottom = bottom_limit + local_bottom
-            bottom = min(bottom, max(bottom_limit, height - int(height * 0.105)))
 
         return min(top, top_limit), max(bottom, bottom_limit)
+
+    @staticmethod
+    def _gallery_surface_bounds(image: np.ndarray, chrome_top: int, chrome_bottom: int) -> Tuple[int, int] | None:
+        image_height, image_width = image.shape[:2]
+        search_top = max(0, min(chrome_top, image_height - 1))
+        search_bottom = max(search_top + 1, min(chrome_bottom, image_height))
+        search_image = image[search_top:search_bottom, :]
+        if search_image.size == 0:
+            return None
+
+        background = ZoomGalleryDetector._estimate_border_color(search_image)
+        diff = np.max(np.abs(search_image.astype(np.int16) - background.astype(np.int16)), axis=2)
+        mask = (diff > 3).astype(np.uint8) * 255
+
+        kernel_width = max(11, image_width // 140)
+        kernel_height = max(7, image_height // 150)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_width, kernel_height))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        surfaces: List[Rect] = []
+        min_width = max(140, int(image_width * 0.16))
+        min_height = max(90, int(image_height * 0.10))
+        min_area = image_width * image_height * 0.012
+
+        for contour in contours:
+            x, y, width, height = cv2.boundingRect(contour)
+            area = width * height
+            if width < min_width or height < min_height or area < min_area:
+                continue
+            fill_ratio = cv2.contourArea(contour) / float(max(1, area))
+            if fill_ratio < 0.22:
+                continue
+            aspect = width / float(max(1, height))
+            if not (1.0 <= aspect <= 8.0):
+                continue
+            surfaces.append((x, y + search_top, width, height))
+
+        if not surfaces:
+            return None
+
+        top = min(rect[1] for rect in surfaces)
+        bottom = max(rect[1] + rect[3] for rect in surfaces)
+        return top, bottom
 
     @staticmethod
     def _activity_boundary_from_top(active_rows: np.ndarray, quiet_run: int, padding: int) -> int:
