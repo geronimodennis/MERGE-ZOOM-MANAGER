@@ -272,6 +272,25 @@ def test_gallery_roi_follows_variable_zoom_menu_heights():
         assert roi_bottom - card_bottom <= 24
 
 
+def test_gallery_roi_finds_bottom_menu_start_when_toolbar_has_quiet_footer():
+    image = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    image[:, :] = (17, 20, 22)
+
+    bottom_menu_y = 948
+    image[100:bottom_menu_y, 60:960] = (34, 34, 34)
+    image[100:bottom_menu_y, 960:1860] = (34, 34, 34)
+    cv2.line(image, (0, bottom_menu_y), (image.shape[1] - 1, bottom_menu_y), (55, 55, 58), 1)
+
+    for x in range(350, 1550, 200):
+        cv2.circle(image, (x, bottom_menu_y + 26), 16, (180, 180, 180), 2)
+        cv2.putText(image, "Start", (x - 24, bottom_menu_y + 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+
+    roi = ZoomGalleryDetector._gallery_search_roi(image)
+    roi_bottom = roi[1] + roi[3]
+
+    assert bottom_menu_y - 16 <= roi_bottom <= bottom_menu_y
+
+
 def test_tracker_keeps_ids_when_gallery_layout_changes():
     detector = ZoomGalleryDetector()
     tracker = ParticipantTracker()

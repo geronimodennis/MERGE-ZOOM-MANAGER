@@ -286,11 +286,31 @@ class ZoomGalleryDetector:
 
         bottom = height
         bottom_active = smooth[bottom_limit:] > threshold
-        if bottom_active.size and bool(np.any(bottom_active[-edge_zone:])):
-            local_bottom = ZoomGalleryDetector._activity_boundary_from_bottom(bottom_active, quiet_run, padding)
-            bottom = bottom_limit + local_bottom
+        bottom_boundary = ZoomGalleryDetector._bottom_chrome_boundary(bottom_active, edge_zone, quiet_run, padding)
+        if bottom_boundary is not None:
+            bottom = bottom_limit + bottom_boundary
 
         return min(top, top_limit), max(bottom, bottom_limit)
+
+    @staticmethod
+    def _bottom_chrome_boundary(
+        active_rows: np.ndarray,
+        edge_zone: int,
+        quiet_run: int,
+        padding: int,
+    ) -> int | None:
+        if not active_rows.size or not bool(np.any(active_rows)):
+            return None
+
+        if bool(np.any(active_rows[-edge_zone:])):
+            return ZoomGalleryDetector._activity_boundary_from_bottom(active_rows, quiet_run, padding)
+
+        # Zoom's toolbar controls can sit above a quiet bottom strip, so do not
+        # require activity in the final rows before treating it as bottom chrome.
+        boundary = ZoomGalleryDetector._activity_boundary_from_bottom(active_rows, quiet_run, padding)
+        if boundary <= max(edge_zone, quiet_run):
+            return None
+        return boundary
 
     @staticmethod
     def _gallery_surface_bounds(image: np.ndarray, chrome_top: int, chrome_bottom: int) -> Tuple[int, int] | None:
